@@ -1,96 +1,98 @@
-# 위임 판단 플레이북
+# Delegation playbook
 
-## 한 줄 기준
+## The one-line test
 
-> **정답을 내가 이미 아는 일**은 위임한다.
-> **정답을 찾아야 하는 일**은 내가 한다.
+> **Work whose answer you already know** gets delegated.
+> **Work where the answer must be found** stays with you.
 
-worker는 넓게 읽고 기계적으로 반복하는 데 강하고, 판단이 필요한 지점에서 약하다.
-판단을 위임하면 그럴듯한 오답이 돌아오고, 나는 그걸 검증하느라 직접 하는 것보다
-더 많은 시간을 쓴다.
+A worker is strong at reading widely and repeating mechanical steps, and weak
+exactly where judgment is required. Delegate judgment and you get a plausible
+wrong answer back, then spend longer verifying it than doing it yourself.
 
-## role 선택
+## Choosing a role
 
-### `explorer` — 읽기 전용, 넓게
+### `explorer` — read-only, wide
 
-쓸 때:
-- 낯선 코드베이스에서 "X는 어디 있나"
-- 같은 패턴을 여러 디렉터리에서 반복 검색
-- 라이브러리/구현 방식 후보를 모을 때 (선택은 내가)
-- 호출 관계, 진입점, 데이터 흐름 지도
+Use it for:
+- "Where is X?" in an unfamiliar codebase
+- The same pattern searched across many directories
+- Collecting library or implementation candidates (you pick)
+- Call graphs, entry points, data flow maps
 
-쓰지 말 것:
-- 파일 하나만 보면 되는 경우 → 내가 읽는 게 빠르다
-- 답을 이미 아는 경우 → 왕복 비용만 든다
+Do not use it for:
+- A single file you could just open — you are faster
+- Anything you already know the answer to — you only pay round-trip cost
 
-지시문에 반드시: **무엇을 찾는지**, **어디까지 볼지**, **`file:line` 필수**.
+The instruction must state: **what you are looking for**, **how far to look**,
+**`file:line` required**.
 
-### `reviewer` — 읽기 전용, 깊게
+### `reviewer` — read-only, deep
 
-쓸 때:
-- 수천 줄 테스트 로그에서 실패 신호 추출
-- 스택 트레이스 → 근본 원인 후보 순위
-- 큰 diff의 위험 지점 훑기
+Use it for:
+- Extracting failure signal from thousands of log lines
+- Stack trace → ranked root-cause candidates
+- Sweeping a large diff for risk
 
-쓰지 말 것:
-- "이 코드 괜찮아?" 같은 열린 질문 → 아첨하는 답이 온다
-- 최종 승인 → reviewer는 승인 권한이 없다
+Do not use it for:
+- Open questions like "is this code okay?" — you get flattery back
+- Final approval — a reviewer has no authority to approve
 
-지시문에 반드시: **판단 기준**, **로그/diff 첨부**(`--file`).
+The instruction must state: **the criteria**, and attach the log or diff (`--file`).
 
-### `worker` — 쓰기
+### `worker` — writing
 
-쓸 때 — **이 4개가 전부 참일 때만**:
-1. 무엇을 바꿀지 파일/함수 단위로 특정했다
-2. 어떻게 바꿀지 내가 이미 정했다
-3. 완료를 판정할 명령이 있다
-4. 틀려도 되돌리기 쉽다 (커밋 안 된 작은 변경)
+Use it **only when all four are true**:
+1. You have named the file and function to change
+2. You have already decided how to change it
+3. There is a command that decides completion
+4. Being wrong is cheap to undo (a small uncommitted change)
 
-하나라도 거짓이면 내가 한다.
+If any one is false, do it yourself.
 
-지시문 템플릿:
+Instruction template:
 
 ```
-<파일:줄>의 <함수>가 <현재 동작>한다. <원하는 동작>으로 바꿔라.
+<file:line> <function> currently <behavior>. Change it to <desired behavior>.
 
-범위: 이 함수만. 다른 파일, 다른 함수, 포맷팅은 건드리지 마라.
-검증: <명령>
-애매하면 편집하지 말고 BLOCKED로 돌아와라.
+Scope: this function only. Do not touch other files, other functions, or formatting.
+Verify: <command>
+If this is ambiguous, make no edits and return BLOCKED.
 ```
 
-## 병렬
+## Parallelism
 
-독립적인 조각은 동시에 띄운다.
+Independent pieces go at once.
 
 ```bash
-ds-worker explorer --dir "$PWD" "인증 경로 지도" &
-ds-worker explorer --dir "$PWD" "세션 저장소 구현 위치" &
+ds-worker explorer --dir "$PWD" "map the auth paths" &
+ds-worker explorer --dir "$PWD" "where the session store is implemented" &
 wait
 ```
 
-**금지**: 같은 파일을 건드리는 `worker` 둘을 동시에. 서로의 편집을 덮어쓴다.
-`explorer` / `reviewer` 는 읽기 전용이라 병렬이 안전하다.
+**Never** run two writing `worker`s against the same file — they overwrite each
+other's edits. `explorer` and `reviewer` are read-only and safe in parallel.
 
-## 세션 재사용
+## Reusing a session
 
-후속 질문은 새 호출보다 세션 이어가기가 싸고 정확하다.
+A follow-up question is cheaper and sharper as a session continuation than as a
+fresh call.
 
 ```bash
-OUT=$(ds-worker explorer --json "인증 경로 지도")
+OUT=$(ds-worker explorer --json "map the auth paths")
 SID=$(printf '%s' "$OUT" | jq -r .session)
-ds-worker explorer --session "$SID" "그중 토큰 만료를 처리하는 곳만 다시"
+ds-worker explorer --session "$SID" "now just the part that handles token expiry"
 ```
 
-단, 세션이 길어지면 worker가 앞의 자기 추측을 사실로 굳힌다. 3~4 왕복 넘어가면
-새 세션으로 리셋한다.
+But a long session lets a worker harden its own earlier guesses into assumptions.
+Past three or four round trips, reset to a new session.
 
-## 비용 감각
+## Cost sense
 
-`--json` 출력의 `.cost` 로 호출별 비용이 보인다. 왕복이 잦아지면
-"직접 읽었으면 끝났을 일"을 위임하고 있는 것이다. 되돌아봐라.
+`.cost` in the `--json` output gives per-call cost. Frequent round trips mean you
+are delegating work that reading it yourself would have finished. Notice that.
 
-## 중단 기준
+## When to stop
 
-- 같은 작업에 두 번 실패 → 위임 중단, 직접 처리
-- 결과 검증이 위임보다 오래 걸림 → 그 종류의 작업은 위임 대상이 아니었다
-- worker가 범위를 계속 벗어남 → 지시문이 불명확한 것. 지시문을 고치거나 직접 한다
+- Two failures on the same task → stop delegating, do it yourself
+- Verification takes longer than delegation → that class of work was never delegable
+- The worker keeps escaping scope → the instruction is unclear. Fix it or take over

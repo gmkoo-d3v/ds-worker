@@ -1,77 +1,80 @@
-# 검증 프로토콜
+# Verification protocol
 
-DeepSeek의 출력은 **주장(claim)** 이다. 사실로 승격되려면 내가 확인해야 한다.
+DeepSeek output is a **claim**. It becomes fact only once you confirm it.
 
-## 승격 규칙
+## Promotion rules
 
-| worker가 말한 것 | 내가 하는 것 |
+| What the worker said | What you do |
 |---|---|
-| `src/a.ts:42 에 X가 있다` | 그 줄을 직접 읽는다. 인용 전 필수 |
-| `Y를 검색했지만 없다` | 같은 패턴을 내가 한 번 돌린다 |
-| `테스트 통과` (출력 없음) | **검증 안 됨.** 내가 명령을 돌린다 |
-| `테스트 통과` (출력 있음) | 중요 변경이면 내가 다시 돌린다 |
-| `A를 고쳤다` | `git diff` 로 실제 변경 범위 확인 |
-| `근본 원인은 Z` | discriminating test 를 내가 돌린다 |
+| `X is at src/a.ts:42` | Open that line. Required before quoting it |
+| `Searched for Y, not found` | Run the same pattern once yourself |
+| `Tests pass` (no output) | **Unverified.** Run the command |
+| `Tests pass` (with output) | For anything that matters, run it again yourself |
+| `Fixed A` | Check the real extent with `git diff` |
+| `Root cause is Z` | Run the discriminating test yourself |
 
-## explorer 결과 검증
+## Verifying explorer output
 
-인용하기 전에 해당 줄을 연다. 근거 없이 넘어가면 존재하지 않는 줄 번호를
-사용자에게 전달하게 된다.
+Open the line before you quote it. Skip this and you hand the user a line number
+that does not exist.
 
 ```bash
 sed -n '38,50p' src/auth.ts
 ```
 
-`SEARCH COVERAGE` 섹션을 읽고 **안 본 곳**을 확인한다. 빠진 디렉터리가
-답을 뒤집을 수 있으면 그것부터 확인한다.
+Read `SEARCH COVERAGE` and note **what was not looked at**. If a skipped directory
+could overturn the conclusion, check that first.
 
-`GAPS` 가 비어 있는데 결론이 너무 깔끔하면 의심한다. 정직한 탐색은 보통 빈틈을 남긴다.
+Be suspicious of an empty `GAPS` section attached to a very clean conclusion.
+Honest exploration usually leaves loose ends.
 
-## worker 결과 검증
+## Verifying worker output
 
-**순서를 지킨다. 1을 건너뛰지 마라.**
+**Keep this order. Do not skip step 1.**
 
-1. **변경 범위 확인** — 지시한 범위를 벗어났는지 먼저 본다
+1. **Check the extent of the change** — scope before correctness
 
    ```bash
    git diff --stat
    git diff
    ```
 
-   범위 이탈이 있으면 그 부분을 되돌리고 나머지만 취한다.
+   Revert anything outside the scope you specified and keep the rest.
 
-2. **검증 명령 재실행** — worker가 붙인 출력을 믿지 않고 내가 돌린다
+2. **Re-run the verification command** — do not trust the pasted output
 
    ```bash
    npm test -- auth
    ```
 
-3. **`NOT DONE` / `RISKS` 를 읽는다** — 여기 적힌 것이 진짜 남은 작업이다
+3. **Read `NOT DONE` and `RISKS`** — that is the real remaining work
 
-4. **`STATUS: BLOCKED` 는 성공이다** — 애매한 상태에서 멈춘 것.
-   내가 애매함을 해소하고 다시 위임하거나 직접 처리한다
+4. **`STATUS: BLOCKED` is a success** — it stopped instead of guessing. Resolve the
+   ambiguity and delegate again, or take it over
 
-## reviewer 결과 검증
+## Verifying reviewer output
 
-각 후보의 `Discriminating test` 를 내가 돌린다. 돌리지 않은 가설은 채택하지 않는다.
-`Contradicts` 가 "none found" 인 후보만 있다면 reviewer가 반증을 찾지 않은 것이다.
+Run each candidate's `Discriminating test` yourself. An untested hypothesis is not
+adopted. If every candidate says "none found" under `Contradicts`, the reviewer did
+not look for counter-evidence.
 
-## 되돌리기 어려운 변경
+## Changes that are hard to undo
 
-worker에게 맡기지 않는다. 내가 한다:
+These never go to a worker. You do them:
 
-- 커밋, 푸시, PR, 태그
-- 마이그레이션, 스키마 변경
-- 의존성 추가/버전 변경
-- 설정 파일, CI, 시크릿
-- 파일 삭제, 대량 rename
+- Commits, pushes, PRs, tags
+- Migrations, schema changes
+- Adding or bumping dependencies
+- Config files, CI, secrets
+- Deleting files, bulk renames
 
-## 사용자에게 보고할 때
+## Reporting to the user
 
-검증된 것과 주장을 **말로 구분한다**.
+Say, in words, which is which.
 
-> 인증 미들웨어는 `src/auth/middleware.ts:88` 에 있습니다 (직접 확인).
-> explorer는 `src/session/store.ts` 에도 검증 경로가 있다고 보고했는데, 아직 확인 전입니다.
+> The auth middleware is at `src/auth/middleware.ts:88` (confirmed directly).
+> The explorer also reported a verification path in `src/session/store.ts`, which
+> I have not checked yet.
 
-"worker가 통과했다고 합니다"는 통과했다는 뜻이 아니다. 그렇게 쓰지 마라.
-검증하지 않았으면 검증하지 않았다고 쓴다.
+"The worker says it passed" does not mean it passed. Do not write it that way.
+If you did not verify, say you did not verify.
