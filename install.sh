@@ -41,11 +41,17 @@ case ":$PATH:" in
 esac
 
 echo "==> skill links"
+# A single unwritable target (wrong ownership, read-only mount, ...) must not
+# abort the rest of the install under `set -e` — the commands/agents/config
+# steps below are independent and should still run.
 for d in "${SKILL_LINK_DIRS[@]}"; do
   if [ -d "$d" ] || mkdir -p "$d" 2>/dev/null; then
-    rm -rf "$d/ds-supervisor"          # previous name, if present
-    ln -sfn "$SKILL_DIR" "$d/$SKILL_NAME"
-    ok "$d/$SKILL_NAME"
+    rm -rf "$d/ds-supervisor" 2>/dev/null || true   # previous name, if present
+    if ln -sfn "$SKILL_DIR" "$d/$SKILL_NAME" 2>/dev/null; then
+      ok "$d/$SKILL_NAME"
+    else
+      warn "could not write $d/$SKILL_NAME (permission denied?) — skipped"
+    fi
   else
     warn "could not create $d — skipped"
   fi
