@@ -145,6 +145,33 @@ subagent that has bash. During testing the explorer pointed this out about itsel
 supervisor's job. With those denied, the explorer is left with `glob, grep, read,
 todowrite` (measured).
 
+### 7. MCP tools are outside the native permission model entirely
+
+`bash: deny` does not stop `serena_execute_shell_command`, and `edit: deny` does
+not stop `serena_replace_symbol_body`. An MCP server declared in `opencode.jsonc`
+injects its tools into **every** agent, and the native permission keys do not
+reach them.
+
+`permission` accepts arbitrary tool-name keys, wildcards included, and a specific
+key beats the wildcard — both confirmed in the resolved output of
+`opencode agent list`. So each agent default-denies the namespace and allows back
+a named read-only set:
+
+```yaml
+  "serena_*": deny
+  "serena_find_symbol": allow
+  ...
+```
+
+Anything the MCP server adds later is denied by default rather than silently
+granted.
+
+**Residual limitation, not fixed here:** an MCP server runs as its own process
+under its own user, so its file reads are bound by *that* user's permissions and
+its own project scope — not by this agent's `external_directory: deny`, and not by
+the file permissions of whoever runs opencode. Narrowing that belongs in the MCP
+server's configuration, not in an agent definition.
+
 ### The guarantee that does hold
 
 With `mode: all`, a real file, and `permission: {bash: deny}`, passing `--auto`

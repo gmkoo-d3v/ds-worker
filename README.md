@@ -77,6 +77,10 @@ ds-serve start|status|stop    # resident backend (ds-worker starts it on demand)
   the call and, after it, greps stderr for `Falling back to default agent` and
   **fails hard with exit 3**.
   Details: [references/opencode-cli.md](skills/worker/references/opencode-cli.md), "Traps".
+- MCP tools bypass the native permission keys entirely, so each agent
+  default-denies the MCP namespace (`"serena_*": deny`) and allows back a named
+  read-only set. Without this, an MCP server declared in `opencode.jsonc` hands
+  every agent a full shell regardless of `bash: deny`.
 - Only `ds-worker` can write. Committing, pushing, PRs and dependency changes are
   forbidden in its prompt, and the supervisor does final verification itself.
 - A writing role refuses to run when `--dir` is `$HOME` or `/`.

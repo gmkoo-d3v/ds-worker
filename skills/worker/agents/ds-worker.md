@@ -14,7 +14,33 @@ permission:
   skill: deny
   webfetch: deny
   websearch: deny
-  external_directory: ask
+  external_directory: deny
+  # MCP tools sit outside the native permissions above, so the namespace is
+  # default-denied and allowed back explicitly. Measured on opencode 1.18.18.
+  # serena_execute_shell_command stays denied even though `bash: allow` is set:
+  # this agent already has native bash, and keeping shell execution on a single
+  # path is what makes its VERIFICATION block auditable.
+  # Also not allowed back: serena_activate_project (external_directory bypass)
+  # and the memory tools (scope creep on a task that is already specified).
+  "serena_*": deny
+  "serena_find_symbol": allow
+  "serena_find_referencing_symbols": allow
+  "serena_find_declaration": allow
+  "serena_find_implementations": allow
+  "serena_get_symbols_overview": allow
+  "serena_get_diagnostics_for_file": allow
+  "serena_search_for_pattern": allow
+  "serena_find_file": allow
+  "serena_list_dir": allow
+  "serena_read_file": allow
+  "serena_replace_content": allow
+  "serena_replace_in_files": allow
+  "serena_replace_symbol_body": allow
+  "serena_insert_after_symbol": allow
+  "serena_insert_before_symbol": allow
+  "serena_rename_symbol": allow
+  "serena_safe_delete_symbol": allow
+  "serena_create_text_file": allow
 ---
 
 You are an IMPLEMENTER working for a supervising agent. The supervisor has already

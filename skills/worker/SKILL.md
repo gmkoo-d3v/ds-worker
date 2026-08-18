@@ -83,7 +83,16 @@ DeepSeek output is a **claim**, not a fact. Required:
 - `agent ... is not installed` / `mode=subagent` → run `install.sh`
 - **exit 3 (`ran the UNRESTRICTED default agent`)** → the sandbox was not applied.
   Discard the result. Re-run `install.sh`, then delegate again
-- `no text output` → inspect the event stream with `--raw`, or the logs in
+- `no text output` → the run may have finished and been billed while the event
+  stream dropped the final message. **The work is usually still in the session.**
+  Recover it — this costs almost nothing, since the model answers from context:
+
+  ```bash
+  ds-worker <role> --session <id> "Repeat your previous final report verbatim."
+  ```
+
+  The session id is printed in the footer of every call. If that comes back empty
+  too, inspect the raw stream with `--raw` or the log in
   `~/.local/state/ds-worker/runs/`
 - Timeout (exit 124) → the task was too big. Split it and delegate again
 - Full diagnostic: `ds-doctor`
