@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# ds-serve — manage the shared OpenCode backend used by ds-worker.
+#
+#   ds-serve start|stop|status|restart|url
+#
+# `start` prints the backend URL on stdout; everything else goes to stderr.
+#
+# IMPORTANT: a responding port is NOT proof the backend is ours. OpenCode TUI
+# sessions run their own HTTP server (default port 4096, then 4097, ...), and
+# attaching `opencode run` to one of those fails with "Session not found" — and
+# would be poking at the user's live session. So we only ever reuse a backend we
+# started ourselves, tracked by pid, and we refuse to squat on a foreign port.
+set -euo pipefail
+
+DS_OPENCODE_HOST="${DS_OPENCODE_HOST:-127.0.0.1}"
+DS_OPENCODE_PORT="${DS_OPENCODE_PORT:-4096}"   # scans upward if occupied
+DS_PORT_SCAN="${DS_PORT_SCAN:-20}"             # ports to try from DS_OPENCODE_PORT
+DS_STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
+
+STATE="$DS_STATE_DIR/serve.state"              # "<pid> <url> <agent-fingerprint>"
+LOG_FILE="$DS_STATE_DIR/serve.log"
+AGENT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
+
+mkdir -p "$DS_STATE_DIR"
+
+die() { printf 'ds-serve: %s\n' "$1" >&2; exit 1; }
+
+# A running backend caches the agent registry it booted with. Editing an agent
+# definition afterwards does nothing until the server restarts — and the failure
+# mode is silent (opencode falls back to the unrestricted default agent). So we
+# fingerprint the agent files and treat a change as "restart required".
+agent_fingerprint() {
+  local out
+  out="$(cat "$AGENT_DIR"/ds-*.md 2>/dev/null | cksum)" || out="none"
+  printf '%s' "${out// /_}"
+}
+
+# Anything accepting TCP on this port? (bash builtin, no lsof permissions needed)
+port_busy() { (exec 3<>"/dev/tcp/$DS_OPENCODE_HOST/$1") 2>/dev/null && exec 3>&- && return 0; return 1; }
+
+# An OpenCode server answers GET /config with JSON.
+responds() { curl -sf -m 3 -o /dev/null -H 'accept: application/json' "$1/config" 2>/dev/null; }
+
+read_state() {
+  [ -f "$STATE" ] || return 1
+  read -r SPID SURL SFP < "$STATE" 2>/dev/null || return 1
+  [ -n "${SPID:-}" ] && [ -n "${SURL:-}" ] || return 1
+  SFP="${SFP:-}"
+}
+
+# Ours = we recorded the pid, that pid is still alive, it still answers, and it
+# booted with the agent definitions currently on disk.
+is_ours() {
+  read_state || return 1
+  kill -0 "$SPID" 2>/dev/null || return 1
+  responds "$SURL" || return 1
+  [ "$SFP" = "$(agent_fingerprint)" ] || return 1
+  return 0
+}
+
+pick_port() {
+  local p="$DS_OPENCODE_PORT" last=$((DS_OPENCODE_PORT + DS_PORT_SCAN))
+  while [ "$p" -le "$last" ]; do
+    port_busy "$p" || { printf '%s\n' "$p"; return 0; }
+    p=$((p + 1))
+  done
+  return 1
+}
+
+cmd_start() {
+  if is_ours; then printf '%s\n' "$SURL"; return 0; fi
+  # Stale for any reason (dead, unresponsive, or booted with older agent files):
+  # kill only what we started, then boot fresh.
+  if read_state && kill -0 "$SPID" 2>/dev/null; then
+    printf 'ds-serve: agent definitions changed, restarting backend (pid %s)\n' "$SPID" >&2
+    kill "$SPID" 2>/dev/null || true
+    local i; for i in $(seq 1 20); do kill -0 "$SPID" 2>/dev/null || break; sleep 0.25; done
+    kill -0 "$SPID" 2>/dev/null && kill -9 "$SPID" 2>/dev/null || true
+  fi
+  rm -f "$STATE"
+  command -v opencode >/dev/null || die "opencode not found on PATH"
+
+  if [ "$DS_OPENCODE_HOST" != "127.0.0.1" ] && [ "$DS_OPENCODE_HOST" != "localhost" ] \
+     && [ -z "${OPENCODE_SERVER_PASSWORD:-}" ]; then
+    die "refusing to bind $DS_OPENCODE_HOST without OPENCODE_SERVER_PASSWORD set"
+  fi
+
+  local port; port="$(pick_port)" \
+    || die "no free port in ${DS_OPENCODE_PORT}..$((DS_OPENCODE_PORT + DS_PORT_SCAN)) (set DS_OPENCODE_PORT)"
+  local url="http://${DS_OPENCODE_HOST}:${port}"
+
+  nohup opencode serve --hostname "$DS_OPENCODE_HOST" --port "$port" >>"$LOG_FILE" 2>&1 &
+  local pid=$!
+  printf '%s %s %s\n' "$pid" "$url" "$(agent_fingerprint)" > "$STATE"
+
+  local i
+  for i in $(seq 1 60); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$STATE"; die "server exited during startup; see $LOG_FILE"
+    fi
+    if responds "$url"; then
+      printf 'ds-serve: up at %s (pid %s)\n' "$url" "$pid" >&2
+      printf '%s\n' "$url"
+      return 0
+    fi
+    sleep 0.5
+  done
+  kill "$pid" 2>/dev/null || true; rm -f "$STATE"
+  die "server did not become ready in 30s; see $LOG_FILE"
+}
+
+cmd_status() {
+  if is_ours; then printf 'up    %s  (pid %s)\n' "$SURL" "$SPID"; return 0; fi
+  if read_state; then printf 'down or stale  %s  (pid %s)\n' "$SURL" "$SPID"
+  else printf 'down  (not started)\n'; fi
+  return 1
+}
+
+# Only ever kills the process we started. Foreign servers are left alone.
+cmd_stop() {
+  if read_state && kill -0 "$SPID" 2>/dev/null; then
+    kill "$SPID" 2>/dev/null || true
+    local i; for i in $(seq 1 20); do kill -0 "$SPID" 2>/dev/null || break; sleep 0.25; done
+    kill -0 "$SPID" 2>/dev/null && kill -9 "$SPID" 2>/dev/null || true
+    printf 'ds-serve: stopped pid %s (%s)\n' "$SPID" "$SURL" >&2
+  else
+    printf 'ds-serve: nothing of ours running\n' >&2
+  fi
+  rm -f "$STATE"
+  return 0
+}
+
+case "${1:-status}" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_stop; cmd_start ;;
+  status)  cmd_status ;;
+  url)     is_ours && printf '%s\n' "$SURL" || { printf 'ds-serve: no backend of ours is running\n' >&2; exit 1; } ;;
+  *)       die "usage: ds-serve start|stop|restart|status|url" ;;
+esac

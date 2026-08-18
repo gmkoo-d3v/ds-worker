@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# ds-worker — delegate one unit of work to a DeepSeek agent running under OpenCode.
+#
+#   ds-worker <role> [options] "<prompt>"
+#   ds-worker <role> [options] -            # prompt on stdin
+#
+# roles:
+#   explorer   read-only codebase mapping, repeated search, candidate gathering
+#   reviewer   read-only analysis of test logs, stack traces, diffs
+#   worker     tightly specified implementation (can edit files and run commands)
+#
+# The caller is the supervisor. Treat everything this prints as a claim to be
+# verified, not as an established fact.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+DS_STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
+DS_TIMEOUT="${DS_TIMEOUT:-900}"
+DS_SERVE="${DS_SERVE:-auto}"          # auto | off
+DS_AUTO="${DS_AUTO:-1}"               # 1 = pass --auto (required for headless)
+
+DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-opencode-go/deepseek-v4-flash}"
+DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-opencode-go/deepseek-v4-pro}"
+DS_MODEL_WORKER="${DS_MODEL_WORKER:-opencode-go/deepseek-v4-pro}"
+
+die() { printf 'ds-worker: %s\n' "$1" >&2; exit 2; }
+note() { printf 'ds-worker: %s\n' "$1" >&2; }
+
+usage() {
+  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  cat >&2 <<'USAGE'
+
+options:
+  --dir <path>        working directory for the agent (default: $PWD)
+  --model <prov/mdl>  override the model for this call
+  --variant <name>    provider reasoning effort (e.g. high, max, minimal)
+  --session <id>      continue an existing OpenCode session
+  --continue          continue the last session
+  --file <path>       attach a file (repeatable)
+  --timeout <sec>     wall clock limit (default: $DS_TIMEOUT)
+  --no-serve          one-shot process, do not use the shared backend
+  --json              emit a JSON envelope instead of prose
+  --raw               emit the raw NDJSON event stream
+  --quiet             suppress the trailer on stderr
+USAGE
+  exit 2
+}
+
+[ $# -ge 1 ] || usage
+ROLE="$1"; shift
+
+case "$ROLE" in
+  explorer) AGENT="ds-explorer"; MODEL="$DS_MODEL_EXPLORER" ;;
+  reviewer) AGENT="ds-reviewer"; MODEL="$DS_MODEL_REVIEWER" ;;
+  worker)   AGENT="ds-worker";   MODEL="$DS_MODEL_WORKER" ;;
+  -h|--help) usage ;;
+  *) die "unknown role '$ROLE' (expected: explorer | reviewer | worker)" ;;
+esac
+
+DIR="$PWD"; VARIANT=""; SESSION=""; CONTINUE=0
+OUT_MODE="text"; QUIET=0; FILES=()
+PROMPT=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir)      DIR="${2:?--dir needs a value}"; shift 2 ;;
+    --model)    MODEL="${2:?--model needs a value}"; shift 2 ;;
+    --variant)  VARIANT="${2:?--variant needs a value}"; shift 2 ;;
+    --session)  SESSION="${2:?--session needs a value}"; shift 2 ;;
+    --continue) CONTINUE=1; shift ;;
+    --file)     FILES+=("${2:?--file needs a value}"); shift 2 ;;
+    --timeout)  DS_TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
+    --no-serve) DS_SERVE="off"; shift ;;
+    --json)     OUT_MODE="json"; shift ;;
+    --raw)      OUT_MODE="raw"; shift ;;
+    --quiet)    QUIET=1; shift ;;
+    -h|--help)  usage ;;
+    --)         shift; PROMPT="$*"; break ;;
+    -)          PROMPT="$(cat)"; shift ;;
+    -*)         die "unknown option '$1'" ;;
+    *)          PROMPT="${PROMPT:+$PROMPT }$1"; shift ;;
+  esac
+done
+
+[ -n "$PROMPT" ] || die "no prompt given"
+command -v opencode >/dev/null || die "opencode not found on PATH"
+command -v jq >/dev/null || die "jq not found on PATH"
+
+DIR="$(cd "$DIR" 2>/dev/null && pwd)" || die "--dir does not exist"
+case "$DIR" in
+  "$HOME"|/) [ "$ROLE" = "worker" ] && die "refusing to run a writing worker with --dir $DIR" ;;
+esac
+
+# `opencode run --agent <unknown>` does NOT fail — it warns on stderr and runs the
+# default agent, which has no permission restrictions. Same for a `mode: subagent`
+# agent. Either way our sandbox silently disappears, so check up front and again
+# after the run.
+AGENT_LINE="$(opencode agent list 2>/dev/null | grep "^${AGENT} " || true)"
+[ -n "$AGENT_LINE" ] || die "agent '$AGENT' is not installed. Run: $SELF_DIR/../install.sh"
+case "$AGENT_LINE" in
+  *"(subagent)"*) die "agent '$AGENT' is mode=subagent; 'opencode run --agent' cannot use it. Set mode: all and re-run install.sh" ;;
+esac
+
+# ---- backend -----------------------------------------------------------------
+# ds-serve prints the URL of a backend *it* owns. It never hands back a foreign
+# server (e.g. an OpenCode TUI squatting on 4096) — attaching to one of those
+# fails with "Session not found" and would disturb the user's live session.
+ATTACH=""
+if [ "$DS_SERVE" != "off" ]; then
+  ATTACH="$("$SELF_DIR/ds-serve" start 2>/dev/null || true)"
+  [ -n "$ATTACH" ] || note "shared backend unavailable, falling back to a one-shot process"
+fi
+
+# ---- command -----------------------------------------------------------------
+ARGS=(run --dir "$DIR" --agent "$AGENT" --model "$MODEL" --format json)
+[ -n "$ATTACH" ]  && ARGS+=(--attach "$ATTACH")
+[ -n "$VARIANT" ] && ARGS+=(--variant "$VARIANT")
+[ -n "$SESSION" ] && ARGS+=(--session "$SESSION")
+[ "$CONTINUE" -eq 1 ] && ARGS+=(--continue)
+[ "$DS_AUTO" = "1" ] && ARGS+=(--auto)
+for f in "${FILES[@]:-}"; do [ -n "$f" ] && ARGS+=(--file "$f"); done
+# `--file` is a yargs *array* option: without a `--` terminator it swallows the
+# prompt that follows it and the run dies with "File not found: <prompt>".
+ARGS+=(--)
+
+ENVELOPE="[supervisor task | role=${ROLE} | cwd=${DIR}]
+
+${PROMPT}
+
+Report using your required output format. If you cannot establish something,
+say so explicitly rather than filling the gap with a plausible guess."
+
+mkdir -p "$DS_STATE_DIR/runs"
+STAMP="$(date +%Y%m%d-%H%M%S)-$$"
+RAW="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.ndjson"
+ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.stderr"
+
+# macOS has no coreutils `timeout`; poll a background child instead.
+run_limited() {
+  local secs="$1"; shift
+  "$@" & local pid=$! waited=0 rc=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 2
+      kill -KILL "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  wait "$pid" || rc=$?
+  return $rc
+}
+
+RC=0
+run_limited "$DS_TIMEOUT" opencode "${ARGS[@]}" "$ENVELOPE" >"$RAW" 2>"$ERR" || RC=$?
+
+if [ "$RC" -eq 124 ]; then
+  note "timed out after ${DS_TIMEOUT}s (partial stream: $RAW)"
+fi
+
+if grep -q "Falling back to default agent" "$ERR" 2>/dev/null; then
+  note "opencode ignored --agent $AGENT and ran the UNRESTRICTED default agent."
+  note "the sandbox for role '$ROLE' did not apply. stderr: $ERR"
+  note "fix: re-run install.sh (agent files must be real files, not symlinks)"
+  exit 3
+fi
+
+# ---- parse -------------------------------------------------------------------
+# The stream is NDJSON: one event object per line, types step_start / text /
+# step_finish / tool. Non-JSON lines (warnings) are dropped rather than fatal.
+RESULT="$(jq -R 'fromjson? // empty' <"$RAW" | jq -s --arg role "$ROLE" \
+  --arg model "$MODEL" --arg dir "$DIR" --arg raw "$RAW" --argjson rc "$RC" '
+  {
+    role:    $role,
+    model:   $model,
+    dir:     $dir,
+    exit:    $rc,
+    session: (map(.sessionID // empty) | last // null),
+    text:    (map(select(.type == "text") | .part.text // "") | join("")),
+    tools:   (map(select(.type == "tool_use")
+                  | (.part.tool // "tool"))),
+    tokens:  (map(select(.type == "step_finish") | .part.tokens // empty) | last),
+    cost:    ((map(select(.type == "step_finish") | .part.cost // 0) | add) // 0),
+    events:  length,
+    raw_log: $raw
+  }')"
+
+TEXT="$(printf '%s' "$RESULT" | jq -r '.text')"
+
+case "$OUT_MODE" in
+  raw)  cat "$RAW" ;;
+  json) printf '%s\n' "$RESULT" ;;
+  text)
+    if [ -n "$TEXT" ]; then
+      printf '%s\n' "$TEXT"
+    else
+      note "no text output; stderr follows"
+      sed -n '1,40p' "$ERR" >&2
+    fi
+    ;;
+esac
+
+if [ "$QUIET" -eq 0 ] && [ "$OUT_MODE" != "raw" ]; then
+  printf '%s' "$RESULT" | jq -r '
+    "--\nrole=\(.role) model=\(.model) session=\(.session // "-") " +
+    "tools=\(.tools | length) cost=$\(.cost) log=\(.raw_log)"' >&2
+fi
+
+exit "$RC"

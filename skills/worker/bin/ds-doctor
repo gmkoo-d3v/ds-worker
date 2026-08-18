@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# ds-doctor — check that delegation to DeepSeek is actually wired up.
+set -uo pipefail
+
+DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-opencode-go/deepseek-v4-flash}"
+DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-opencode-go/deepseek-v4-pro}"
+DS_MODEL_WORKER="${DS_MODEL_WORKER:-opencode-go/deepseek-v4-pro}"
+
+FAIL=0
+pass() { printf '  \033[32mok\033[0m    %s\n' "$1"; }
+fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=1; }
+info() { printf '  --    %s\n' "$1"; }
+
+echo "ds-doctor"
+
+for c in opencode jq curl; do
+  command -v "$c" >/dev/null && pass "$c ($(command -v "$c"))" || fail "$c not on PATH"
+done
+
+if command -v opencode >/dev/null; then
+  info "opencode $(opencode --version 2>/dev/null | head -1)"
+
+  creds="$(opencode auth list 2>/dev/null | grep -cE '^\S' || true)"
+  [ "${creds:-0}" -gt 0 ] && pass "credentials present" || fail "no credentials — run: opencode auth login"
+
+  models="$(opencode models 2>/dev/null)"
+  for m in "$DS_MODEL_EXPLORER" "$DS_MODEL_REVIEWER" "$DS_MODEL_WORKER"; do
+    printf '%s\n' "$models" | grep -qxF "$m" \
+      && pass "model $m" \
+      || fail "model $m not available (opencode models | grep deepseek)"
+  done
+
+  agents="$(opencode agent list 2>/dev/null)"
+  agent_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
+  for a in ds-explorer ds-reviewer ds-worker; do
+    line="$(printf '%s\n' "$agents" | grep "^${a} " || true)"
+    if [ -z "$line" ]; then
+      fail "agent $a not installed — run install.sh"
+    elif printf '%s' "$line" | grep -q '(subagent)'; then
+      fail "agent $a is mode=subagent — 'run --agent' would fall back to the default agent"
+    elif [ -L "$agent_dir/$a.md" ]; then
+      fail "agent $a is a symlink — OpenCode lists it but ignores it at run time; re-run install.sh"
+    elif [ ! -f "$agent_dir/$a.md" ]; then
+      fail "agent $a file missing at $agent_dir/$a.md"
+    else
+      pass "agent $a"
+    fi
+  done
+fi
+
+SERVE="$(dirname "$(command -v ds-serve || echo "$(dirname "$0")/ds-serve")")/ds-serve"
+if url="$("$SERVE" url 2>/dev/null)"; then
+  pass "backend up at $url (ours)"
+else
+  info "no backend of ours running (ds-worker starts one on demand)"
+fi
+
+[ "$FAIL" -eq 0 ] && echo "all checks passed" || echo "some checks failed" >&2
+exit "$FAIL"
