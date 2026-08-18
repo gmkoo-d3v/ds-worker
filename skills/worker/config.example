@@ -21,6 +21,16 @@
 #DS_MODEL_REVIEWER=opencode-go/deepseek-v4-pro
 #DS_MODEL_WORKER=opencode-go/deepseek-v4-pro
 
+# OpenCode Zen's free tier bills $0 and needs no subscription. Expect rate
+# limits under load. Note the -free suffix: `opencode/deepseek-v4-flash` without
+# it is not a real model id, and the run fails at dispatch.
+#DS_MODEL_EXPLORER=opencode/deepseek-v4-flash-free
+#DS_MODEL_REVIEWER=opencode/deepseek-v4-flash-free
+#DS_MODEL_WORKER=opencode/deepseek-v4-flash-free
+
+# A key may appear more than once; the last line wins. Copy a block, edit the
+# copy, and the earlier one stays as a record of what you moved away from.
+
 # --- execution --------------------------------------------------------------
 # DS_TIMEOUT  seconds before a single call is killed (exit 124)
 # DS_SERVE    auto = reuse a shared backend, off = fresh process per call

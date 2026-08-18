@@ -11,6 +11,22 @@
 # would be poking at the user's live session. So we only ever reuse a backend we
 # started ourselves, tracked by pid, and we refuse to squat on a foreign port.
 set -euo pipefail
+# Shared by ds-worker, ds-serve and ds-doctor: what the file says must be what
+# runs, and what `ds-doctor --config` prints must be what the file says.
+# Handles `key = value`, quoted values, a trailing ` # comment`, and a leading ~.
+ds_norm_value() {
+  local val="$1" key="${2:-}"
+  val="${val%%$'\t'#*}"; case "$val" in *" #"*) val="${val%% #*}" ;; esac
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
+  case "$val" in
+    \"*\") val="${val#\"}"; val="${val%\"}" ;;
+    \'*\') val="${val#\'}"; val="${val%\'}" ;;
+  esac
+  case "$key" in *DIR) val="${val/#\~/$HOME}" ;; esac
+  printf '%s' "$val"
+}
+
 # ---------------------------------------------------------------------------
 # Config file. Precedence: environment > config file > built-in defaults below.
 # The file is PARSED, not sourced: a settings file has no business running
@@ -18,7 +34,13 @@ set -euo pipefail
 DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
 ds_load_config() {
   [ -f "$DS_CONFIG" ] || return 0
-  local line key val n=0
+  local line key val n=0 locked=" "
+  # Snapshot what the environment already set, so a later line in the file can
+  # override an earlier one (last wins, as `ds-doctor --config` reports) without
+  # any file line ever overriding the environment.
+  for key in DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER DS_TIMEOUT DS_SERVE DS_AUTO DS_STATE_DIR DS_OPENCODE_HOST DS_OPENCODE_PORT DS_PORT_SCAN; do
+    [ -n "${!key:-}" ] && locked="$locked$key "
+  done
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1))
     line="${line#"${line%%[![:space:]]*}"}"          # ltrim
@@ -26,19 +48,14 @@ ds_load_config() {
     case "$line" in *=*) ;; *) continue ;; esac
     key="${line%%=*}"; val="${line#*=}"
     key="${key//[[:space:]]/}"
-    val="${val#"${val%%[![:space:]]*}"}"             # ltrim
-    val="${val%"${val##*[![:space:]]}"}"             # rtrim
-    case "$val" in \"*\") val="${val#\"}"; val="${val%\"}" ;;
-                   \'*\') val="${val#\'}"; val="${val%\'}" ;; esac
     case "$key" in
       DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER|DS_TIMEOUT|DS_SERVE|\
       DS_AUTO|DS_STATE_DIR|DS_OPENCODE_HOST|DS_OPENCODE_PORT|DS_PORT_SCAN) ;;
       *) printf '%s: %s:%s: unknown key %s (ignored)\n' "${0##*/}" "$DS_CONFIG" "$n" "$key" >&2
          continue ;;
     esac
-    case "$key" in DS_STATE_DIR) val="${val/#\~/$HOME}" ;; esac
-    # Only fill in what the environment did not already set.
-    [ -n "${!key:-}" ] || printf -v "$key" '%s' "$val"
+    case "$locked" in *" $key "*) continue ;; esac
+    printf -v "$key" '%s' "$(ds_norm_value "$val" "$key")"
   done < "$DS_CONFIG"
 }
 ds_load_config
