@@ -14,6 +14,38 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ---------------------------------------------------------------------------
+# Config file. Precedence: environment > config file > built-in defaults below.
+# The file is PARSED, not sourced: a settings file has no business running
+# commands, and these scripts drive an agent that can edit code.
+DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
+ds_load_config() {
+  [ -f "$DS_CONFIG" ] || return 0
+  local line key val n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line#"${line%%[![:space:]]*}"}"          # ltrim
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key//[[:space:]]/}"
+    val="${val#"${val%%[![:space:]]*}"}"             # ltrim
+    val="${val%"${val##*[![:space:]]}"}"             # rtrim
+    case "$val" in \"*\") val="${val#\"}"; val="${val%\"}" ;;
+                   \'*\') val="${val#\'}"; val="${val%\'}" ;; esac
+    case "$key" in
+      DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER|DS_TIMEOUT|DS_SERVE|\
+      DS_AUTO|DS_STATE_DIR|DS_OPENCODE_HOST|DS_OPENCODE_PORT|DS_PORT_SCAN) ;;
+      *) printf '%s: %s:%s: unknown key %s (ignored)\n' "${0##*/}" "$DS_CONFIG" "$n" "$key" >&2
+         continue ;;
+    esac
+    case "$key" in DS_STATE_DIR) val="${val/#\~/$HOME}" ;; esac
+    # Only fill in what the environment did not already set.
+    [ -n "${!key:-}" ] || printf -v "$key" '%s' "$val"
+  done < "$DS_CONFIG"
+}
+ds_load_config
+
 
 DS_STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
 DS_TIMEOUT="${DS_TIMEOUT:-900}"

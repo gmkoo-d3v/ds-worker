@@ -2,9 +2,52 @@
 # ds-doctor — check that delegation to DeepSeek is actually wired up.
 set -uo pipefail
 
-DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-opencode-go/deepseek-v4-flash}"
-DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-opencode-go/deepseek-v4-pro}"
-DS_MODEL_WORKER="${DS_MODEL_WORKER:-opencode-go/deepseek-v4-pro}"
+DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
+
+# One list, so --config can report a default without invoking the other tools.
+# Keep in sync with the defaults in ds-worker and ds-serve.
+ds_default() {
+  case "$1" in
+    DS_MODEL_EXPLORER)                 echo "opencode-go/deepseek-v4-flash" ;;
+    DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "opencode-go/deepseek-v4-pro" ;;
+    DS_TIMEOUT)        echo 900 ;;
+    DS_SERVE)          echo auto ;;
+    DS_AUTO)           echo 1 ;;
+    DS_OPENCODE_HOST)  echo 127.0.0.1 ;;
+    DS_OPENCODE_PORT)  echo 4096 ;;
+    DS_PORT_SCAN)      echo 20 ;;
+    DS_STATE_DIR)      echo "${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker" ;;
+  esac
+}
+
+ds_from_file() {
+  [ -f "$DS_CONFIG" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$DS_CONFIG" 2>/dev/null | tail -1
+}
+
+# The point of a settings file is being able to see whether it actually took.
+if [ "${1:-}" = "--config" ]; then
+  if [ -f "$DS_CONFIG" ]; then printf 'config: %s\n\n' "$DS_CONFIG"
+  else printf 'config: %s  (not present — built-in defaults)\n\n' "$DS_CONFIG"; fi
+  for k in DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER \
+           DS_TIMEOUT DS_SERVE DS_AUTO \
+           DS_OPENCODE_HOST DS_OPENCODE_PORT DS_PORT_SCAN DS_STATE_DIR; do
+    fv="$(ds_from_file "$k")"
+    if   [ -n "${!k:-}" ]; then src=environment; val="${!k}"
+    elif [ -n "$fv" ];    then src="config file"; val="$fv"
+    else                       src=default;      val="$(ds_default "$k")"
+    fi
+    printf '  %-19s %-32s %s\n' "$k" "$val" "$src"
+  done
+  exit 0
+fi
+
+DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-$(ds_from_file DS_MODEL_EXPLORER)}"
+DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-$(ds_from_file DS_MODEL_REVIEWER)}"
+DS_MODEL_WORKER="${DS_MODEL_WORKER:-$(ds_from_file DS_MODEL_WORKER)}"
+DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-$(ds_default DS_MODEL_EXPLORER)}"
+DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-$(ds_default DS_MODEL_REVIEWER)}"
+DS_MODEL_WORKER="${DS_MODEL_WORKER:-$(ds_default DS_MODEL_WORKER)}"
 
 FAIL=0
 pass() { printf '  \033[32mok\033[0m    %s\n' "$1"; }

@@ -45,6 +45,14 @@ Main options: `--dir` working directory · `--model` override · `--session <id>
 a session · `--file` attach a file · `--json` structured output · `--timeout <sec>`.
 Full list: `ds-worker --help`. CLI facts: [references/opencode-cli.md](references/opencode-cli.md).
 
+Defaults (models per role, timeout, backend) live in `~/.config/ds-worker/config`.
+`ds-doctor --config` prints what is in effect and where each value came from.
+An environment variable still wins for a single call:
+
+```bash
+DS_MODEL_REVIEWER=opencode-go/deepseek-v4-flash ds-worker reviewer --file test.log "..."
+```
+
 ## Writing the instruction
 
 A worker's output never exceeds the quality of its instruction. Every call:

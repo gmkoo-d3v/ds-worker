@@ -1,0 +1,45 @@
+# ds-worker configuration
+#
+# Copy to ~/.config/ds-worker/config (install.sh does this for you if it is
+# missing) and uncomment what you want to change. Every value here is a default:
+# an environment variable of the same name always wins, so you can still
+# override per call:
+#
+#   DS_MODEL_REVIEWER=opencode-go/deepseek-v4-flash ds-worker reviewer "..."
+#
+# This file is PARSED, not sourced. Only the keys listed below are read, values
+# are taken literally, and nothing here is executed. No $(...), no variables.
+# Check what is actually in effect with:  ds-doctor --config
+
+# --- models -----------------------------------------------------------------
+# See what this machine has:  opencode models | grep deepseek
+# Measured cost: pro is roughly 3-4x flash. explorer does wide mechanical
+# reading and its file:line claims get verified anyway, so it defaults to flash.
+# worker writes code, where a plausible-but-wrong edit is the expensive failure.
+
+#DS_MODEL_EXPLORER=opencode-go/deepseek-v4-flash
+#DS_MODEL_REVIEWER=opencode-go/deepseek-v4-pro
+#DS_MODEL_WORKER=opencode-go/deepseek-v4-pro
+
+# --- execution --------------------------------------------------------------
+# DS_TIMEOUT  seconds before a single call is killed (exit 124)
+# DS_SERVE    auto = reuse a shared backend, off = fresh process per call
+# DS_AUTO     1 = pass --auto. Required for headless runs; it cannot override a
+#             `deny` in an agent definition, which is what keeps the read-only
+#             roles read-only. Set to 0 only when debugging permission prompts.
+
+#DS_TIMEOUT=900
+#DS_SERVE=auto
+#DS_AUTO=1
+
+# --- backend ----------------------------------------------------------------
+# DS_OPENCODE_PORT is a starting point. If it is busy (an OpenCode TUI often
+# holds 4096), ds-serve scans upward and never attaches to a server it did not
+# start. Binding anything other than loopback requires OPENCODE_SERVER_PASSWORD.
+
+#DS_OPENCODE_HOST=127.0.0.1
+#DS_OPENCODE_PORT=4096
+#DS_PORT_SCAN=20
+
+# --- paths ------------------------------------------------------------------
+#DS_STATE_DIR=~/.local/state/ds-worker

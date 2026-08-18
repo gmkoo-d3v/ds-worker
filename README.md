@@ -51,7 +51,24 @@ ds-serve start|status|stop    # resident backend (ds-worker starts it on demand)
 
 ## Configuration
 
-| Environment variable | Default |
+`~/.config/ds-worker/config` — created by `install.sh` from
+[`config.example`](skills/worker/config.example) with everything commented out.
+Precedence is **environment > config file > built-in default**, so the file sets
+your normal preference and an environment variable still overrides a single call.
+
+```bash
+ds-doctor --config        # every setting, its value, and where that value came from
+```
+
+It lives in your own config directory rather than beside the skill on purpose:
+the skill directory is a git repo shared between accounts by symlink, so a
+settings file there could not be written by every account that uses it, and every
+edit would dirty the working tree.
+
+The file is parsed, not sourced — unknown keys are reported with a line number
+and ignored, and nothing in it is executed.
+
+| Setting | Default |
 |---|---|
 | `DS_MODEL_EXPLORER` | `opencode-go/deepseek-v4-flash` |
 | `DS_MODEL_WORKER` | `opencode-go/deepseek-v4-pro` |

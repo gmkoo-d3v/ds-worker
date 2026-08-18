@@ -51,6 +51,19 @@ for d in "${SKILL_LINK_DIRS[@]}"; do
   fi
 done
 
+CONFIG_DST="${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config"
+echo "==> config -> $CONFIG_DST"
+# Per-user, deliberately NOT inside the skill: the skill directory is a git repo
+# shared between accounts by symlink, so a settings file there could not be
+# written by every account that uses it, and would dirty the working tree.
+mkdir -p "$(dirname "$CONFIG_DST")"
+if [ -f "$CONFIG_DST" ]; then
+  ok "kept existing config"
+else
+  cp "$SKILL_DIR/config.example" "$CONFIG_DST"
+  ok "created from config.example (all settings commented out)"
+fi
+
 echo "==> backend"
 # A live backend caches the agent registry it booted with; drop ours so the next
 # ds-worker call boots with what we just installed.
@@ -64,4 +77,5 @@ cat <<'NEXT'
 Next:
   ds-serve start                      # warm the shared backend (optional)
   ds-worker explorer "map this repo"  # smoke test
+  ds-doctor --config                  # what is in effect, and where it came from
 NEXT
