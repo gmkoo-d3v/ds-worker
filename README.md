@@ -74,10 +74,46 @@ and ignored, and nothing in it is executed.
 | `DS_MODEL_WORKER` | `opencode-go/deepseek-v4-pro` |
 | `DS_MODEL_REVIEWER` | `opencode-go/deepseek-v4-pro` |
 | `DS_OPENCODE_HOST` / `DS_OPENCODE_PORT` | `127.0.0.1` / `4096` (scans upward if busy) |
+| `DS_PORT_SCAN` | `20` (ports tried from `DS_OPENCODE_PORT`) |
 | `DS_TIMEOUT` | `900` (seconds) |
 | `DS_SERVE` | `auto` (`off` spawns a fresh process per call) |
 | `DS_AUTO` | `1` (passes `--auto`) |
 | `DS_STATE_DIR` | `~/.local/state/ds-worker` |
+
+### Choosing a model per role
+
+Only `explorer` runs on flash by default; `reviewer` and `worker` run on pro.
+
+Rates derived from this repo's own run logs (blended with cache reads, so
+approximate): **pro costs roughly 3-4x flash** — input ~$0.65/M vs ~$0.22/M,
+output ~$2.94/M vs ~$0.77/M.
+
+The split follows where a wrong answer is expensive:
+
+- `explorer` does wide mechanical reading, and the supervisor opens every
+  `file:line` it reports anyway, so a miss is caught cheaply. flash.
+- `worker` writes code. A plausible-but-wrong edit costs review time and can land
+  a bad change. pro.
+- `reviewer` produces a ranked diagnosis that the supervisor may act on.
+  pro by default, but see below.
+
+Measured A/B on `reviewer`, same log, same prompt, deliberately awkward input
+(the log described a failure the source no longer contained):
+
+| model | cost | tool calls | outcome |
+|---|---|---|---|
+| flash | $0.0071 | 18 | reached the correct conclusion |
+| pro | $0.0250 | 20 | reached the correct conclusion, ranking a little sharper |
+
+Both spotted that the on-disk code disagreed with the log and both proposed the
+same deciding command. On that evidence flash is a defensible choice for
+`reviewer` at about a third of the cost — one data point on a small fixture, so
+the gap may widen on a large codebase and a long log. To switch, uncomment the
+line in `~/.config/ds-worker/config`:
+
+```
+DS_MODEL_REVIEWER=opencode-go/deepseek-v4-flash
+```
 
 ## Safety model
 
