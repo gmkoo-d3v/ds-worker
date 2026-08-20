@@ -69,10 +69,41 @@ DS_STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
 STATE="$DS_STATE_DIR/serve.state"              # "<pid> <url> <agent-fingerprint>"
 LOG_FILE="$DS_STATE_DIR/serve.log"
 AGENT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
+LOCK_DIR="$DS_STATE_DIR/serve.lock"
+LOCK_HELD=0
 
 mkdir -p "$DS_STATE_DIR"
 
 die() { printf 'ds-serve: %s\n' "$1" >&2; exit 1; }
+
+release_lock() {
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+  rm -f "$LOCK_DIR/pid"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  LOCK_HELD=0
+}
+
+acquire_lock() {
+  local i owner
+  for i in $(seq 1 600); do
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$LOCK_DIR/pid"
+      LOCK_HELD=1
+      trap release_lock EXIT
+      return 0
+    fi
+
+    owner=""
+    [ -f "$LOCK_DIR/pid" ] && read -r owner < "$LOCK_DIR/pid" || true
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -f "$LOCK_DIR/pid"
+      rmdir "$LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.05
+  done
+  die "timed out waiting for serve lock"
+}
 
 # A running backend caches the agent registry it booted with. Editing an agent
 # definition afterwards does nothing until the server restarts — and the failure
@@ -117,7 +148,8 @@ pick_port() {
 }
 
 cmd_start() {
-  if is_ours; then printf '%s\n' "$SURL"; return 0; fi
+  acquire_lock
+  if is_ours; then printf '%s\n' "$SURL"; release_lock; return 0; fi
   # Stale for any reason (dead, unresponsive, or booted with older agent files):
   # kill only what we started, then boot fresh.
   if read_state && kill -0 "$SPID" 2>/dev/null; then
@@ -150,6 +182,7 @@ cmd_start() {
     if responds "$url"; then
       printf 'ds-serve: up at %s (pid %s)\n' "$url" "$pid" >&2
       printf '%s\n' "$url"
+      release_lock
       return 0
     fi
     sleep 0.5
@@ -167,6 +200,7 @@ cmd_status() {
 
 # Only ever kills the process we started. Foreign servers are left alone.
 cmd_stop() {
+  acquire_lock
   if read_state && kill -0 "$SPID" 2>/dev/null; then
     kill "$SPID" 2>/dev/null || true
     local i; for i in $(seq 1 20); do kill -0 "$SPID" 2>/dev/null || break; sleep 0.25; done
@@ -176,6 +210,7 @@ cmd_stop() {
     printf 'ds-serve: nothing of ours running\n' >&2
   fi
   rm -f "$STATE"
+  release_lock
   return 0
 }
 
