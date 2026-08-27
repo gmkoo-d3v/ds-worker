@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ds-doctor — check that delegation to DeepSeek is actually wired up.
+# ds-doctor — check that delegation to the GX10 Gemma agent is actually wired up.
 set -uo pipefail
 
 DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
@@ -8,8 +8,7 @@ DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
 # Keep in sync with the defaults in ds-worker and ds-serve.
 ds_default() {
   case "$1" in
-    DS_MODEL_EXPLORER)                 echo "opencode-go/deepseek-v4-flash" ;;
-    DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "opencode-go/deepseek-v4-pro" ;;
+    DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "gx10/gemma4-26b-a4b-sglang" ;;
     DS_TIMEOUT)        echo 900 ;;
     DS_SERVE)          echo auto ;;
     DS_AUTO)           echo 1 ;;
@@ -89,7 +88,7 @@ if command -v opencode >/dev/null; then
   for m in "$DS_MODEL_EXPLORER" "$DS_MODEL_REVIEWER" "$DS_MODEL_WORKER"; do
     printf '%s\n' "$models" | grep -qxF "$m" \
       && pass "model $m" \
-      || fail "model $m not available (opencode models | grep deepseek)"
+      || fail "model $m not available (opencode models | grep gx10)"
   done
 
   agents="$(opencode agent list 2>/dev/null)"

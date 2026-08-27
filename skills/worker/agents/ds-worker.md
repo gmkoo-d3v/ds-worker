@@ -1,6 +1,7 @@
 ---
-description: DeepSeek implementer for tightly specified changes. Edits files and runs verification commands, then reports what it actually ran and what the output actually was. Does not expand scope.
+description: GX10 Gemma implementer for tightly specified changes. Edits files and runs verification commands, then reports what it actually ran and what the output actually was. Does not expand scope.
 mode: all
+model: gx10/gemma4-26b-a4b-sglang
 temperature: 0.1
 permission:
   edit: allow

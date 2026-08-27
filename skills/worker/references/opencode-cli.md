@@ -47,7 +47,7 @@ Attaching:
 
 ```bash
 opencode run --attach http://127.0.0.1:4096 --dir "$PWD" \
-  --agent ds-explorer --model opencode-go/deepseek-v4-flash -- "..."
+  --agent ds-explorer --model gx10/gemma4-26b-a4b-sglang -- "..."
 ```
 
 ## `--format json` output shape (measured)
@@ -179,15 +179,16 @@ still does not let bash run (measured: `NO_BASH`, zero tool calls).
 **`--auto` cannot override `deny`.** But if any of traps 1–4 applies, the agent
 itself never took effect, and this guarantee disappears with it.
 
-## DeepSeek models (actually available on this machine)
+## Models (actually available on this machine)
 
 ```
-opencode/deepseek-v4-flash-free     # free tier
-opencode-go/deepseek-v4-flash       # default explorer
-opencode-go/deepseek-v4-pro         # default worker / reviewer
+gx10/gemma4-26b-a4b-sglang          # local GX10 box, :8000 — default explorer/reviewer/worker
+gx10-8888/qwen3.8-27b                # local GX10 box, :8888 — alternate, not Gemma
+opencode/deepseek-v4-flash-free      # cloud free tier, unused by default
 ```
 
-This changes. Check with `opencode models | grep deepseek`.
+Provider config (baseURL, timeouts) lives in `~/.config/opencode/opencode.jsonc`
+under `provider.gx10`. This changes. Check with `opencode models | grep gx10`.
 
 ## OmO Slim (optional)
 

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# ds-worker-rr — round-robin wrapper around ds-worker.
+#
+# Was: alternates the model between two free cloud providers per call, to
+# spread load. Now pinned to the local GX10 Gemma box (unmetered, no rate
+# limit), so there is nothing left to rotate — this stays a single-entry
+# "rotation" so callers that already invoke ds-worker-rr keep working
+# unchanged. State is a small counter file per role.
+#
+#   ds-worker-rr <role> [ds-worker options] "<prompt>"
+#
+# All options/arguments are passed through to ds-worker unchanged; this
+# wrapper only injects --model unless the caller already passed one.
+set -euo pipefail
+
+MODELS=(
+  "gx10/gemma4-26b-a4b-sglang"
+)
+
+[ $# -ge 1 ] || { echo "usage: ds-worker-rr <role> [options] \"<prompt>\"" >&2; exit 2; }
+role="$1"; shift
+
+# If the caller already passed --model, don't override their choice.
+for a in "$@"; do
+  if [ "$a" = "--model" ]; then
+    exec ds-worker "$role" "$@"
+  fi
+done
+
+STATE_DIR="${DS_STATE_DIR:-$HOME/.local/state/ds-worker}"
+STATE_DIR="${STATE_DIR/#\~/$HOME}"
+mkdir -p "$STATE_DIR"
+COUNTER_FILE="$STATE_DIR/rr_${role}.count"
+
+# Simple flock-free increment; a lost race just repeats a provider once,
+# which is harmless for round-robin load spreading.
+n=0
+[ -f "$COUNTER_FILE" ] && n="$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)"
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
+idx=$(( n % ${#MODELS[@]} ))
+echo $(( n + 1 )) > "$COUNTER_FILE"
+
+model="${MODELS[$idx]}"
+exec ds-worker "$role" --model "$model" "$@"

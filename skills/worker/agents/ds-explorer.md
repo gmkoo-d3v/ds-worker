@@ -1,6 +1,7 @@
 ---
-description: Read-only DeepSeek explorer. Maps a codebase, runs repetitive searches, and gathers implementation candidates. Returns evidence with file:line references. Never edits.
+description: Read-only GX10 Gemma explorer. Maps a codebase, runs repetitive searches, and gathers implementation candidates. Returns evidence with file:line references. Never edits.
 mode: all
+model: gx10/gemma4-26b-a4b-sglang
 temperature: 0.1
 permission:
   edit: deny

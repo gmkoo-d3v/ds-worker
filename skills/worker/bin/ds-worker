@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ds-worker — delegate one unit of work to a DeepSeek agent running under OpenCode.
+# ds-worker — delegate one unit of work to a GX10 Gemma agent running under OpenCode.
 #
 #   ds-worker <role> [options] "<prompt>"
 #   ds-worker <role> [options] -            # prompt on stdin
@@ -69,9 +69,9 @@ DS_TIMEOUT="${DS_TIMEOUT:-900}"
 DS_SERVE="${DS_SERVE:-auto}"          # auto | off
 DS_AUTO="${DS_AUTO:-1}"               # 1 = pass --auto (required for headless)
 
-DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-opencode-go/deepseek-v4-flash}"
-DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-opencode-go/deepseek-v4-pro}"
-DS_MODEL_WORKER="${DS_MODEL_WORKER:-opencode-go/deepseek-v4-pro}"
+DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-gx10/gemma4-26b-a4b-sglang}"
+DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-gx10/gemma4-26b-a4b-sglang}"
+DS_MODEL_WORKER="${DS_MODEL_WORKER:-gx10/gemma4-26b-a4b-sglang}"
 
 die() { printf 'ds-worker: %s\n' "$1" >&2; exit 2; }
 note() { printf 'ds-worker: %s\n' "$1" >&2; }
