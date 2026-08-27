@@ -1,7 +1,7 @@
 ---
-description: GX10 Gemma implementer for tightly specified changes. Edits files and runs verification commands, then reports what it actually ran and what the output actually was. Does not expand scope.
+description: GX10 Qwen implementer for tightly specified changes. Edits files and runs verification commands, then reports what it actually ran and what the output actually was. Does not expand scope.
 mode: all
-model: gx10/gemma4-26b-a4b-sglang
+model: gx10-8888/qwen3.8-27b
 temperature: 0.1
 permission:
   edit: allow

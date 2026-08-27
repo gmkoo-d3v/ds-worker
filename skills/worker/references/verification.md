@@ -1,6 +1,6 @@
 # Verification protocol
 
-GX10 Gemma output is a **claim**. It becomes fact only once you confirm it.
+GX10 Qwen output is a **claim**. It becomes fact only once you confirm it.
 
 ## Promotion rules
 

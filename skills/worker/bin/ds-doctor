@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ds-doctor — check that delegation to the GX10 Gemma agent is actually wired up.
+# ds-doctor — check that delegation to the GX10 Qwen agent is actually wired up.
 set -uo pipefail
 
 DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
@@ -8,7 +8,7 @@ DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
 # Keep in sync with the defaults in ds-worker and ds-serve.
 ds_default() {
   case "$1" in
-    DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "gx10/gemma4-26b-a4b-sglang" ;;
+    DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "gx10-8888/qwen3.8-27b" ;;
     DS_TIMEOUT)        echo 900 ;;
     DS_SERVE)          echo auto ;;
     DS_AUTO)           echo 1 ;;

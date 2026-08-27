@@ -1,7 +1,7 @@
 ---
-description: Read-only GX10 Gemma explorer. Maps a codebase, runs repetitive searches, and gathers implementation candidates. Returns evidence with file:line references. Never edits.
+description: Read-only GX10 Qwen explorer. Maps a codebase, runs repetitive searches, and gathers implementation candidates. Returns evidence with file:line references. Never edits.
 mode: all
-model: gx10/gemma4-26b-a4b-sglang
+model: gx10-8888/qwen3.8-27b
 temperature: 0.1
 permission:
   edit: deny

@@ -2,7 +2,7 @@
 # ds-worker-rr — round-robin wrapper around ds-worker.
 #
 # Was: alternates the model between two free cloud providers per call, to
-# spread load. Now pinned to the local GX10 Gemma box (unmetered, no rate
+# spread load. Now pinned to the local GX10 Qwen box (unmetered, no rate
 # limit), so there is nothing left to rotate — this stays a single-entry
 # "rotation" so callers that already invoke ds-worker-rr keep working
 # unchanged. State is a small counter file per role.
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 MODELS=(
-  "gx10/gemma4-26b-a4b-sglang"
+  "gx10-8888/qwen3.8-27b"
 )
 
 [ $# -ge 1 ] || { echo "usage: ds-worker-rr <role> [options] \"<prompt>\"" >&2; exit 2; }

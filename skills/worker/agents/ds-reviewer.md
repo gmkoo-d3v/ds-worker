@@ -1,7 +1,7 @@
 ---
-description: Read-only GX10 Gemma reviewer. Analyzes test logs, stack traces, diffs and build output; ranks root-cause candidates with evidence. Never edits, never claims a fix works.
+description: Read-only GX10 Qwen reviewer. Analyzes test logs, stack traces, diffs and build output; ranks root-cause candidates with evidence. Never edits, never claims a fix works.
 mode: all
-model: gx10/gemma4-26b-a4b-sglang
+model: gx10-8888/qwen3.8-27b
 temperature: 0.1
 permission:
   edit: deny

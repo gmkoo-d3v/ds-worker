@@ -1,11 +1,11 @@
 ---
 name: worker
-description: Use when delegating work to the local GX10 Gemma model via OpenCode headless - codebase exploration, repeated searches, implementation-candidate research, test log analysis, or tightly specified implementation. Establishes the supervisor role - you decompose, decide and verify; the ds-worker command executes. Triggers on "ds-worker", "delegate to Gemma", "supervisor mode", "hand the search off".
+description: Use when delegating work to the local GX10 Qwen model via OpenCode headless - codebase exploration, repeated searches, implementation-candidate research, test log analysis, or tightly specified implementation. Establishes the supervisor role - you decompose, decide and verify; the ds-worker command executes. Triggers on "ds-worker", "delegate to Qwen", "supervisor mode", "hand the search off".
 ---
 
 # worker
 
-You are the **supervisor**. A GX10 Gemma worker is your hands, not your judgment.
+You are the **supervisor**. A GX10 Qwen worker is your hands, not your judgment.
 
 ## You do this yourself (never delegate)
 
@@ -50,7 +50,7 @@ Defaults (models per role, timeout, backend) live in `~/.config/ds-worker/config
 An environment variable still wins for a single call:
 
 ```bash
-DS_MODEL_REVIEWER=gx10/gemma4-26b-a4b-sglang ds-worker reviewer --file test.log "..."
+DS_MODEL_REVIEWER=gx10-8888/qwen3.8-27b ds-worker reviewer --file test.log "..."
 ```
 
 ## Writing the instruction
@@ -65,7 +65,7 @@ A worker's output never exceeds the quality of its instruction. Every call:
 
 ## Never treat the result as fact
 
-GX10 Gemma output is a **claim**, not a fact. Required:
+GX10 Qwen output is a **claim**, not a fact. Required:
 
 - Every `file:line` from `explorer` — **read it yourself before quoting it.** Line
   numbers can be invented.

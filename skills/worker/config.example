@@ -5,7 +5,7 @@
 # an environment variable of the same name always wins, so you can still
 # override per call:
 #
-#   DS_MODEL_REVIEWER=gx10/gemma4-26b-a4b-sglang ds-worker reviewer "..."
+#   DS_MODEL_REVIEWER=gx10-8888/qwen3.8-27b ds-worker reviewer "..."
 #
 # This file is PARSED, not sourced. Only the keys listed below are read, values
 # are taken literally, and nothing here is executed. No $(...), no variables.
@@ -13,9 +13,14 @@
 
 # --- models -----------------------------------------------------------------
 # See what this machine has:  opencode models | grep gx10
-# Built-in default (no config needed): the local GX10 Gemma box for all three
+# Built-in default (no config needed): the local GX10 Qwen box for all three
 # roles — no external API, no per-call billing, no rate limit.
 
+#DS_MODEL_EXPLORER=gx10-8888/qwen3.8-27b
+#DS_MODEL_REVIEWER=gx10-8888/qwen3.8-27b
+#DS_MODEL_WORKER=gx10-8888/qwen3.8-27b
+
+# The other local box: GX10 Gemma, :8000.
 #DS_MODEL_EXPLORER=gx10/gemma4-26b-a4b-sglang
 #DS_MODEL_REVIEWER=gx10/gemma4-26b-a4b-sglang
 #DS_MODEL_WORKER=gx10/gemma4-26b-a4b-sglang

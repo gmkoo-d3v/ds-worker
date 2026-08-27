@@ -47,7 +47,7 @@ Attaching:
 
 ```bash
 opencode run --attach http://127.0.0.1:4096 --dir "$PWD" \
-  --agent ds-explorer --model gx10/gemma4-26b-a4b-sglang -- "..."
+  --agent ds-explorer --model gx10-8888/qwen3.8-27b -- "..."
 ```
 
 ## `--format json` output shape (measured)
@@ -182,8 +182,8 @@ itself never took effect, and this guarantee disappears with it.
 ## Models (actually available on this machine)
 
 ```
-gx10/gemma4-26b-a4b-sglang          # local GX10 box, :8000 — default explorer/reviewer/worker
-gx10-8888/qwen3.8-27b                # local GX10 box, :8888 — alternate, not Gemma
+gx10-8888/qwen3.8-27b                # local GX10 box, :8888 — default explorer/reviewer/worker
+gx10/gemma4-26b-a4b-sglang           # local GX10 box, :8000 — alternate, not Qwen
 opencode/deepseek-v4-flash-free      # cloud free tier, unused by default
 ```
 
