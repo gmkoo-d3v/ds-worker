@@ -1,7 +1,8 @@
 # superviser
 
 A skill that keeps Claude/Codex in the **supervisor** seat and hands wide,
-repetitive work to a DeepSeek worker running on OpenCode headless.
+repetitive work to a local GX10 worker (DeepSeek, falling back to Qwen)
+running on OpenCode headless.
 
 ```
         ┌──────────────────────────┐
@@ -18,7 +19,7 @@ repetitive work to a DeepSeek worker running on OpenCode headless.
        ▼             ▼             ▼
   ds-explorer   ds-worker    ds-reviewer
    read-only     can write    read-only
-   flash         pro          pro
+   DeepSeek→Qwen DeepSeek→Qwen DeepSeek→Qwen
 ```
 
 ## Install
@@ -40,8 +41,8 @@ ds-doctor      # diagnostics
 ## Usage
 
 ```bash
-ds-worker explorer "Find the auth middleware: entry point and failure paths. file:line required."
-ds-worker reviewer --file test.log "Rank the root-cause candidates for this failure."
+ds-worker explorer "Find every call site of checkToken in src/ — list all of them, not a sample. file:line required."
+ds-worker reviewer --file test.log "Rank the root-cause candidates for this failure, reading the log to its end."
 ds-worker worker "checkToken at src/auth.ts:42 returns 500 for an expired token. Make it 401. Verify: npm test -- auth"
 ```
 
@@ -70,50 +71,43 @@ and ignored, and nothing in it is executed.
 
 | Setting | Default |
 |---|---|
-| `DS_MODEL_EXPLORER` | `opencode-go/deepseek-v4-flash` |
-| `DS_MODEL_WORKER` | `opencode-go/deepseek-v4-pro` |
-| `DS_MODEL_REVIEWER` | `opencode-go/deepseek-v4-pro` |
+| `DS_MODEL_EXPLORER` / `DS_MODEL_REVIEWER` / `DS_MODEL_WORKER` | `gx10-8000/deepseek-v4-flash-exl3-cross` (primary) |
+| `DS_MODEL_EXPLORER_FALLBACK` / `DS_MODEL_REVIEWER_FALLBACK` / `DS_MODEL_WORKER_FALLBACK` | `gx10-8888/qwen3.8-27b` (fallback) |
+| `DS_MODEL_RETRIES` | `2` (attempts per model before moving to the next) |
+| `DS_IDLE_TIMEOUT` | `60` seconds without an NDJSON write (`0` disables) |
+| `DS_MAX_RUNTIME` | `3600` seconds |
+| `DS_TIMEOUT` | `3600` seconds (legacy alias for `DS_MAX_RUNTIME`) |
+| `DS_PROGRESS_INTERVAL` | `15` seconds (`0` disables progress notices) |
+| `DS_AUTO_RECOVER_READONLY` | `1` (one recovery for explorer/reviewer) |
+| `DS_RECOVERY_IDLE_TIMEOUT` / `DS_RECOVERY_MAX_RUNTIME` | `60` / `180` seconds |
 | `DS_OPENCODE_HOST` / `DS_OPENCODE_PORT` | `127.0.0.1` / `4096` (scans upward if busy) |
 | `DS_PORT_SCAN` | `20` (ports tried from `DS_OPENCODE_PORT`) |
-| `DS_TIMEOUT` | `900` (seconds) |
 | `DS_SERVE` | `auto` (`off` spawns a fresh process per call) |
 | `DS_AUTO` | `1` (passes `--auto`) |
 | `DS_STATE_DIR` | `~/.local/state/ds-worker` |
 
 ### Choosing a model per role
 
-Only `explorer` runs on flash by default; `reviewer` and `worker` run on pro.
+Each role has a primary and a fallback model, both local GX10 boxes by
+default: DeepSeek (`:8000`) first, then Qwen (`:8888`) if DeepSeek fails.
+`ds-worker` tries the primary up to `DS_MODEL_RETRIES` times, then the
+fallback up to `DS_MODEL_RETRIES` times, stopping at the first success. You
+can override either model per role independently in the config file, or skip
+the whole chain for a single call with `--model <provider/model>` (runs
+exactly that model once); the wrapper always records the model actually used
+in its JSON result (`model`, `attempts`, `fallback_used`) and footer.
 
-Rates derived from this repo's own run logs (blended with cache reads, so
-approximate): **pro costs roughly 3-4x flash** — input ~$0.65/M vs ~$0.22/M,
-output ~$2.94/M vs ~$0.77/M.
+- `explorer` reads and searches only.
+- `reviewer` diagnoses logs, diffs, and test output without changing files.
+- `worker` performs a tightly specified edit and reports its verification.
+  Because a timeout can land after a partial edit, `worker`'s chain only
+  advances to the next attempt while `--dir` is a git working tree confirmed
+  unchanged since the chain started — otherwise it stops immediately and
+  hands the partial result back to the supervisor. See "Safety model" below.
 
-The split follows where a wrong answer is expensive:
-
-- `explorer` does wide mechanical reading, and the supervisor opens every
-  `file:line` it reports anyway, so a miss is caught cheaply. flash.
-- `worker` writes code. A plausible-but-wrong edit costs review time and can land
-  a bad change. pro.
-- `reviewer` produces a ranked diagnosis that the supervisor may act on.
-  pro by default, but see below.
-
-Measured A/B on `reviewer`, same log, same prompt, deliberately awkward input
-(the log described a failure the source no longer contained):
-
-| model | cost | tool calls | outcome |
-|---|---|---|---|
-| flash | $0.0071 | 18 | reached the correct conclusion |
-| pro | $0.0250 | 20 | reached the correct conclusion, ranking a little sharper |
-
-Both spotted that the on-disk code disagreed with the log and both proposed the
-same deciding command. On that evidence flash is a defensible choice for
-`reviewer` at about a third of the cost — one data point on a small fixture, so
-the gap may widen on a large codebase and a long log. To switch, uncomment the
-line in `~/.config/ds-worker/config`:
-
-```
-DS_MODEL_REVIEWER=opencode-go/deepseek-v4-flash
-```
+For a slow local reasoning model, set the provider's `chunkTimeout` and absolute
+`timeout` in OpenCode's provider configuration. `ds-worker` separately watches
+NDJSON output activity and enforces `DS_MAX_RUNTIME`.
 
 ## Safety model
 
@@ -137,8 +131,34 @@ DS_MODEL_REVIEWER=opencode-go/deepseek-v4-flash
 - Only `ds-worker` can write. Committing, pushing, PRs and dependency changes are
   forbidden in its prompt, and the supervisor does final verification itself.
 - A writing role refuses to run when `--dir` is `$HOME` or `/`.
+- The writing `worker` role's primary/fallback chain never advances past an
+  attempt that may have edited files: it snapshots `git status --porcelain`
+  in `--dir` before the chain starts and re-checks it after every failed
+  attempt, stopping the chain the moment anything differs (or `--dir` is not
+  a git working tree at all, since that can't be confirmed either way).
 - The backend binds loopback. Any other bind is refused without
   `OPENCODE_SERVER_PASSWORD`.
+
+## Result and timeout contract
+
+`ds-worker --json` emits one structured result after the raw NDJSON stream is
+saved under `DS_STATE_DIR`. The `outcome` field distinguishes `CLEAN_RESULT`,
+`FINAL_ARTIFACT_MISSING`, `TOOL_ONLY_NO_FINAL_ARTIFACT`, `IDLE_TIMEOUT`,
+`MAX_RUNTIME`, and other failures. Exit `124` is always uncertain work: inspect
+`raw_log`, `stderr_log`, and the session before continuing. Beyond `ds-worker`'s
+own git-guarded primary/fallback chain (see "Safety model"), the supervisor
+should never re-invoke a writing role automatically.
+
+The wrapper's idle timer resets on every NDJSON write, including reasoning and
+tool events, while `DS_MAX_RUNTIME` is an independent absolute cap. Numeric
+progress notices go to stderr at `DS_PROGRESS_INTERVAL` and never include raw
+model output.
+
+If an explorer or reviewer has a session but no required final report, the
+wrapper makes at most one read-only recovery request in that same session. A
+successful recovery sets `recovered: true`; the original result remains visible
+through `initial_outcome`, `initial_exit`, and `initial_timeout_reason`. Disable
+this behavior with `DS_AUTO_RECOVER_READONLY=0`.
 
 ## After editing an agent definition
 
@@ -152,4 +172,5 @@ The resident backend restarts itself when the agent-file fingerprint changes.
 ## Run logs
 
 `~/.local/state/ds-worker/runs/<timestamp>-<role>.ndjson` — the raw event stream
-and stderr for every call.
+and matching `.stderr` file for every call. A recovery, when attempted, gets
+separate `-recovery.ndjson` and `-recovery.stderr` files.

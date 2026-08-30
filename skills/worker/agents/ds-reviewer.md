@@ -1,7 +1,7 @@
 ---
-description: Read-only GX10 Qwen reviewer. Analyzes test logs, stack traces, diffs and build output; ranks root-cause candidates with evidence. Never edits, never claims a fix works.
+description: Read-only GX10 DeepSeek/Qwen reviewer. Analyzes test logs, stack traces, diffs and build output; ranks root-cause candidates with evidence. Never edits, never claims a fix works.
 mode: all
-model: gx10-8888/qwen3.8-27b
+model: gx10/qwen3.8-flash-next
 temperature: 0.1
 permission:
   edit: deny

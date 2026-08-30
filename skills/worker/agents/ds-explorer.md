@@ -1,7 +1,7 @@
 ---
-description: Read-only GX10 Qwen explorer. Maps a codebase, runs repetitive searches, and gathers implementation candidates. Returns evidence with file:line references. Never edits.
+description: Read-only GX10 DeepSeek/Qwen explorer. Maps a codebase, runs repetitive searches, and gathers implementation candidates. Returns evidence with file:line references. Never edits.
 mode: all
-model: gx10-8888/qwen3.8-27b
+model: gx10/qwen3.8-flash-next
 temperature: 0.1
 permission:
   edit: deny

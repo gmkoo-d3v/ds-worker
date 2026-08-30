@@ -13,7 +13,25 @@
 # verified, not as an established fact.
 set -euo pipefail
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# install.sh places an absolute symlink in ~/.local/bin. Resolve that symlink
+# before locating the sibling lib/ directory in the repository.
+SOURCE_PATH="${BASH_SOURCE[0]}"
+SOURCE_HOPS=0
+while [ -L "$SOURCE_PATH" ]; do
+  SOURCE_HOPS=$((SOURCE_HOPS + 1))
+  [ "$SOURCE_HOPS" -le 40 ] || {
+    printf 'ds-worker: symlink chain too deep: %s\n' "$SOURCE_PATH" >&2
+    exit 2
+  }
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+  SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+  case "$SOURCE_PATH" in
+    /*) ;;
+    *) SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH" ;;
+  esac
+done
+SELF_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+. "$SELF_DIR/../lib/process-watchdog.sh"
 # Shared by ds-worker, ds-serve and ds-doctor: what the file says must be what
 # runs, and what `ds-doctor --config` prints must be what the file says.
 # Handles `key = value`, quoted values, a trailing ` # comment`, and a leading ~.
@@ -41,7 +59,10 @@ ds_load_config() {
   # Snapshot what the environment already set, so a later line in the file can
   # override an earlier one (last wins, as `ds-doctor --config` reports) without
   # any file line ever overriding the environment.
-  for key in DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER DS_TIMEOUT DS_SERVE DS_AUTO DS_STATE_DIR DS_OPENCODE_HOST DS_OPENCODE_PORT DS_PORT_SCAN; do
+  for key in DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER \
+             DS_MODEL_EXPLORER_FALLBACK DS_MODEL_REVIEWER_FALLBACK DS_MODEL_WORKER_FALLBACK DS_MODEL_RETRIES \
+             DS_MODEL_AUTODETECT DS_MODEL_ENDPOINT \
+             DS_TIMEOUT DS_IDLE_TIMEOUT DS_MAX_RUNTIME DS_SERVE DS_AUTO DS_STATE_DIR DS_OPENCODE_HOST DS_OPENCODE_PORT DS_PORT_SCAN DS_PROGRESS_INTERVAL DS_AUTO_RECOVER_READONLY DS_RECOVERY_IDLE_TIMEOUT DS_RECOVERY_MAX_RUNTIME; do
     [ -n "${!key:-}" ] && locked="$locked$key "
   done
   while IFS= read -r line || [ -n "$line" ]; do
@@ -52,8 +73,11 @@ ds_load_config() {
     key="${line%%=*}"; val="${line#*=}"
     key="${key//[[:space:]]/}"
     case "$key" in
-      DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER|DS_TIMEOUT|DS_SERVE|\
-      DS_AUTO|DS_STATE_DIR|DS_OPENCODE_HOST|DS_OPENCODE_PORT|DS_PORT_SCAN) ;;
+      DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER|\
+      DS_MODEL_EXPLORER_FALLBACK|DS_MODEL_REVIEWER_FALLBACK|DS_MODEL_WORKER_FALLBACK|DS_MODEL_RETRIES|\
+      DS_MODEL_AUTODETECT|DS_MODEL_ENDPOINT|\
+      DS_TIMEOUT|DS_IDLE_TIMEOUT|DS_MAX_RUNTIME|DS_SERVE|\
+      DS_AUTO|DS_STATE_DIR|DS_OPENCODE_HOST|DS_OPENCODE_PORT|DS_PORT_SCAN|DS_PROGRESS_INTERVAL|DS_AUTO_RECOVER_READONLY|DS_RECOVERY_IDLE_TIMEOUT|DS_RECOVERY_MAX_RUNTIME) ;;
       *) printf '%s: %s:%s: unknown key %s (ignored)\n' "${0##*/}" "$DS_CONFIG" "$n" "$key" >&2
          continue ;;
     esac
@@ -65,13 +89,35 @@ ds_load_config
 
 
 DS_STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
-DS_TIMEOUT="${DS_TIMEOUT:-900}"
+DS_TIMEOUT="${DS_TIMEOUT:-3600}"          # legacy alias for max runtime
+DS_IDLE_TIMEOUT="${DS_IDLE_TIMEOUT:-60}" # 0 disables the outer idle watchdog
+DS_MAX_RUNTIME="${DS_MAX_RUNTIME:-$DS_TIMEOUT}"
 DS_SERVE="${DS_SERVE:-auto}"          # auto | off
 DS_AUTO="${DS_AUTO:-1}"               # 1 = pass --auto (required for headless)
+DS_PROGRESS_INTERVAL="${DS_PROGRESS_INTERVAL:-15}"
+DS_AUTO_RECOVER_READONLY="${DS_AUTO_RECOVER_READONLY:-1}"
+DS_RECOVERY_IDLE_TIMEOUT="${DS_RECOVERY_IDLE_TIMEOUT:-60}"
+DS_RECOVERY_MAX_RUNTIME="${DS_RECOVERY_MAX_RUNTIME:-180}"
 
-DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-gx10-8888/qwen3.8-27b}"
-DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-gx10-8888/qwen3.8-27b}"
-DS_MODEL_WORKER="${DS_MODEL_WORKER:-gx10-8888/qwen3.8-27b}"
+# Primary model per role: local GX10 box (vLLM, :8000), the only endpoint served.
+# There is no second endpoint to fall back to, so the fallback defaults are empty
+# and the chain is primary-only; set DS_MODEL_*_FALLBACK to re-arm a second model.
+DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-gx10/deepseek-v4-flash-exl3-cross}"
+DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-gx10/deepseek-v4-flash-exl3-cross}"
+DS_MODEL_WORKER="${DS_MODEL_WORKER:-gx10/deepseek-v4-flash-exl3-cross}"
+DS_MODEL_EXPLORER_FALLBACK="${DS_MODEL_EXPLORER_FALLBACK:-}"
+DS_MODEL_REVIEWER_FALLBACK="${DS_MODEL_REVIEWER_FALLBACK:-}"
+DS_MODEL_WORKER_FALLBACK="${DS_MODEL_WORKER_FALLBACK:-}"
+DS_MODEL_RETRIES="${DS_MODEL_RETRIES:-2}"    # attempts per model before moving on
+
+# The GX10 box serves exactly one model at a time, so the configured primary
+# goes stale the moment a different model is loaded. With autodetect on (the
+# default), ds-worker asks the endpoint which model is actually loaded and uses
+# that instead. DS_MODEL_ENDPOINT is derived from the provider's baseURL in
+# opencode.jsonc when left empty, so the URL has exactly one home.
+DS_MODEL_AUTODETECT="${DS_MODEL_AUTODETECT:-1}"
+DS_MODEL_ENDPOINT="${DS_MODEL_ENDPOINT:-}"
+DS_MODEL_DETECT_TIMEOUT="${DS_MODEL_DETECT_TIMEOUT:-5}"
 
 die() { printf 'ds-worker: %s\n' "$1" >&2; exit 2; }
 note() { printf 'ds-worker: %s\n' "$1" >&2; }
@@ -80,14 +126,28 @@ usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   cat >&2 <<'USAGE'
 
+Each role's model defaults to a primary/fallback chain: the primary model up to
+DS_MODEL_RETRIES times, then the fallback model up to DS_MODEL_RETRIES times,
+stopping at the first success (default: local DeepSeek on :8000, 2 attempts; no
+fallback is configured, so the run fails outright once those are spent — set
+DS_MODEL_<ROLE>_FALLBACK to add a second model). --model bypasses the chain and
+runs exactly that model once.
+For the writing 'worker' role, the chain only continues while --dir is a git
+working tree confirmed unchanged since the chain started.
+
 options:
   --dir <path>        working directory for the agent (default: $PWD)
-  --model <prov/mdl>  override the model for this call
+  --model <prov/mdl>  override the model for this call (disables the fallback chain)
   --variant <name>    provider reasoning effort (e.g. high, max, minimal)
   --session <id>      continue an existing OpenCode session
   --continue          continue the last session
   --file <path>       attach a file (repeatable)
-  --timeout <sec>     wall clock limit (default: $DS_TIMEOUT)
+  --idle-timeout <s>  no OpenCode NDJSON output for this long (default: $DS_IDLE_TIMEOUT; 0 disables)
+  --max-runtime <s>   absolute wall clock limit (default: $DS_MAX_RUNTIME)
+  --progress-interval <s>  numeric NDJSON progress heartbeat interval (0 disables)
+  --recover-readonly  enable one read-only session recovery (default)
+  --no-recover-readonly  disable read-only session recovery
+  --timeout <sec>     legacy alias for --max-runtime
   --no-serve          one-shot process, do not use the shared backend
   --json              emit a JSON envelope instead of prose
   --raw               emit the raw NDJSON event stream
@@ -100,9 +160,9 @@ USAGE
 ROLE="$1"; shift
 
 case "$ROLE" in
-  explorer) AGENT="ds-explorer"; MODEL="$DS_MODEL_EXPLORER" ;;
-  reviewer) AGENT="ds-reviewer"; MODEL="$DS_MODEL_REVIEWER" ;;
-  worker)   AGENT="ds-worker";   MODEL="$DS_MODEL_WORKER" ;;
+  explorer) AGENT="ds-explorer"; MODEL="$DS_MODEL_EXPLORER"; MODEL_FALLBACK="$DS_MODEL_EXPLORER_FALLBACK" ;;
+  reviewer) AGENT="ds-reviewer"; MODEL="$DS_MODEL_REVIEWER"; MODEL_FALLBACK="$DS_MODEL_REVIEWER_FALLBACK" ;;
+  worker)   AGENT="ds-worker";   MODEL="$DS_MODEL_WORKER";   MODEL_FALLBACK="$DS_MODEL_WORKER_FALLBACK" ;;
   -h|--help) usage ;;
   *) die "unknown role '$ROLE' (expected: explorer | reviewer | worker)" ;;
 esac
@@ -110,16 +170,22 @@ esac
 DIR="$PWD"; VARIANT=""; SESSION=""; CONTINUE=0
 OUT_MODE="text"; QUIET=0; FILES=()
 PROMPT=""
+EXPLICIT_MODEL=0    # 1 once --model is given: runs that single model, no fallback chain
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)      DIR="${2:?--dir needs a value}"; shift 2 ;;
-    --model)    MODEL="${2:?--model needs a value}"; shift 2 ;;
+    --model)    MODEL="${2:?--model needs a value}"; EXPLICIT_MODEL=1; shift 2 ;;
     --variant)  VARIANT="${2:?--variant needs a value}"; shift 2 ;;
     --session)  SESSION="${2:?--session needs a value}"; shift 2 ;;
     --continue) CONTINUE=1; shift ;;
     --file)     FILES+=("${2:?--file needs a value}"); shift 2 ;;
-    --timeout)  DS_TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
+    --idle-timeout) DS_IDLE_TIMEOUT="${2:?--idle-timeout needs a value}"; shift 2 ;;
+    --max-runtime)  DS_MAX_RUNTIME="${2:?--max-runtime needs a value}"; shift 2 ;;
+    --progress-interval) DS_PROGRESS_INTERVAL="${2:?--progress-interval needs a value}"; shift 2 ;;
+    --recover-readonly) DS_AUTO_RECOVER_READONLY=1; shift ;;
+    --no-recover-readonly) DS_AUTO_RECOVER_READONLY=0; shift ;;
+    --timeout)      DS_TIMEOUT="${2:?--timeout needs a value}"; DS_MAX_RUNTIME="$DS_TIMEOUT"; shift 2 ;;
     --no-serve) DS_SERVE="off"; shift ;;
     --json)     OUT_MODE="json"; shift ;;
     --raw)      OUT_MODE="raw"; shift ;;
@@ -136,6 +202,33 @@ done
 command -v opencode >/dev/null || die "opencode not found on PATH"
 command -v jq >/dev/null || die "jq not found on PATH"
 
+is_nonnegative_integer() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+is_nonnegative_integer "$DS_IDLE_TIMEOUT" \
+  || die "--idle-timeout must be a non-negative integer (seconds)"
+is_nonnegative_integer "$DS_MAX_RUNTIME" \
+  || die "--max-runtime must be a non-negative integer (seconds)"
+is_nonnegative_integer "$DS_PROGRESS_INTERVAL" \
+  || die "--progress-interval must be a non-negative integer (seconds)"
+is_nonnegative_integer "$DS_RECOVERY_IDLE_TIMEOUT" \
+  || die "DS_RECOVERY_IDLE_TIMEOUT must be a non-negative integer (seconds)"
+is_nonnegative_integer "$DS_RECOVERY_MAX_RUNTIME" \
+  || die "DS_RECOVERY_MAX_RUNTIME must be a non-negative integer (seconds)"
+is_nonnegative_integer "$DS_MODEL_RETRIES" \
+  || die "DS_MODEL_RETRIES must be a non-negative integer"
+[ "$DS_MAX_RUNTIME" -gt 0 ] \
+  || die "--max-runtime must be greater than zero"
+[ "$DS_RECOVERY_MAX_RUNTIME" -gt 0 ] \
+  || die "DS_RECOVERY_MAX_RUNTIME must be greater than zero"
+[ "$DS_MODEL_RETRIES" -gt 0 ] \
+  || die "DS_MODEL_RETRIES must be greater than zero"
+case "$DS_AUTO_RECOVER_READONLY" in
+  0|1) ;;
+  *) die "DS_AUTO_RECOVER_READONLY must be 0 or 1" ;;
+esac
+
 DIR="$(cd "$DIR" 2>/dev/null && pwd)" || die "--dir does not exist"
 case "$DIR" in
   "$HOME"|/) [ "$ROLE" = "worker" ] && die "refusing to run a writing worker with --dir $DIR" ;;
@@ -151,6 +244,174 @@ case "$AGENT_LINE" in
   *"(subagent)"*) die "agent '$AGENT' is mode=subagent; 'opencode run --agent' cannot use it. Set mode: all and re-run install.sh" ;;
 esac
 
+# ---- progress and result contract --------------------------------------------
+ds_collect_ndjson_metrics() {
+  local output_path="$1" metrics
+  DS_PROGRESS_EVENTS=0
+  DS_PROGRESS_TOOLS=0
+  DS_PROGRESS_TEXT_CHARS=0
+  DS_PROGRESS_FINISHES=0
+
+  [ -s "$output_path" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  metrics="$(
+    jq -R 'fromjson? // empty' <"$output_path" 2>/dev/null |
+      jq -s -r '
+        [
+          length,
+          (map(select(.type == "tool_use" or .type == "tool")) | length),
+          (map(select(.type == "text") | (.part.text // "") | length) | add // 0),
+          (map(select(.type == "step_finish")) | length)
+        ] | @tsv
+      ' 2>/dev/null || true
+  )"
+  [ -n "$metrics" ] || return 0
+  IFS=$'\t' read -r DS_PROGRESS_EVENTS DS_PROGRESS_TOOLS \
+    DS_PROGRESS_TEXT_CHARS DS_PROGRESS_FINISHES <<<"$metrics"
+}
+
+ds_report_progress() {
+  local output_path="$1" elapsed_seconds="$2"
+  ds_collect_ndjson_metrics "$output_path"
+  printf 'ds-worker: progress elapsed=%ss events=%s tools=%s text_chars=%s step_finishes=%s\n' \
+    "$elapsed_seconds" "$DS_PROGRESS_EVENTS" "$DS_PROGRESS_TOOLS" \
+    "$DS_PROGRESS_TEXT_CHARS" "$DS_PROGRESS_FINISHES" >&2
+}
+
+ds_start_progress_monitor() {
+  local output_path="$1" stop_path="$2" interval="$3"
+  [ "$interval" -gt 0 ] || return 0
+  (
+    local started_at now
+    started_at="$(date +%s)"
+    while [ ! -e "$stop_path" ]; do
+      sleep "$interval" || break
+      [ -e "$stop_path" ] && break
+      now="$(date +%s)"
+      ds_report_progress "$output_path" "$((now - started_at))"
+    done
+  ) &
+  DS_PROGRESS_PID=$!
+}
+
+ds_stop_progress_monitor() {
+  local stop_path="$1"
+  [ -n "${DS_PROGRESS_PID:-}" ] || return 0
+  : >"$stop_path"
+  kill "$DS_PROGRESS_PID" 2>/dev/null || true
+  wait "$DS_PROGRESS_PID" 2>/dev/null || true
+  rm -f "$stop_path"
+  DS_PROGRESS_PID=""
+}
+
+ds_is_read_only_role() {
+  [ "$ROLE" = explorer ] || [ "$ROLE" = reviewer ]
+}
+
+# Safety guard for the writing `worker` role's fallback chain: a timeout or
+# failure can happen after a partial edit, so the chain may only continue to
+# the next model/attempt when --dir is provably unchanged since the chain
+# started. Not a git working tree = provably nothing, so treat it as unsafe.
+ds_git_status_snapshot() {
+  local dir="$1"
+  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || { printf '%s' "__not_a_git_repo__"; return 0; }
+  git -C "$dir" status --porcelain 2>/dev/null
+}
+
+ds_has_required_final_artifact() {
+  local text="$1" marker
+  case "$ROLE" in
+    explorer)
+      for marker in '### SUMMARY' '### FINDINGS' '### SEARCH COVERAGE' '### GAPS'; do
+        case "$text" in *"$marker"*) ;; *) return 1 ;; esac
+      done
+      ;;
+    reviewer)
+      for marker in '### VERDICT' '### LITERAL EVIDENCE' '### ROOT CAUSE CANDIDATES' '### INSUFFICIENT'; do
+        case "$text" in *"$marker"*) ;; *) return 1 ;; esac
+      done
+      ;;
+    worker)
+      for marker in '### STATUS' '### CHANGES' '### VERIFICATION' '### NOT DONE' '### RISKS'; do
+        case "$text" in *"$marker"*) ;; *) return 1 ;; esac
+      done
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+ds_build_result() {
+  local raw_path="$1" child_rc="$2" timeout_reason="$3" phase="$4" stderr_path="$5"
+  local idle_timeout="$6" max_runtime="$7"
+  local base text tool_count has_final=0 outcome status
+
+  base="$(jq -R 'fromjson? // empty' <"$raw_path" | jq -s \
+    --arg role "$ROLE" --arg model "$MODEL" --arg dir "$DIR" --arg raw "$raw_path" \
+    --arg stderr "$stderr_path" --arg timeout_reason "$timeout_reason" --arg phase "$phase" \
+    --argjson rc "$child_rc" --arg idle_timeout "$idle_timeout" --arg max_runtime "$max_runtime" '
+    {
+      role: $role,
+      model: $model,
+      dir: $dir,
+      exit: $rc,
+      status: (if $rc == 0 then "completed" elif $rc == 124 then "timed_out_unknown" else "failed" end),
+      session: (map(.sessionID // empty) | last // null),
+      text: (map(select(.type == "text") | .part.text // "") | join("")),
+      tools: (map(select(.type == "tool_use" or .type == "tool") | (.part.tool // ""))),
+      tokens: (map(select(.type == "step_finish") | .part.tokens // empty) | last),
+      cost: ((map(select(.type == "step_finish") | .part.cost // 0) | add) // 0),
+      events: length,
+      step_finish_count: (map(select(.type == "step_finish")) | length),
+      idle_timeout: ($idle_timeout | tonumber),
+      max_runtime: ($max_runtime | tonumber),
+      timeout_reason: (if $rc == 124 then $timeout_reason else null end),
+      raw_log: $raw,
+      stderr_log: $stderr,
+      phase: $phase
+    }')"
+  text="$(printf '%s' "$base" | jq -r '.text')"
+  tool_count="$(printf '%s' "$base" | jq -r '.tools | length')"
+  ds_has_required_final_artifact "$text" && has_final=1
+
+  if [ "$child_rc" -eq 0 ] && [ "$has_final" -eq 1 ]; then
+    outcome=CLEAN_RESULT
+    status=completed
+  elif [ "$child_rc" -eq 0 ]; then
+    outcome=FINAL_ARTIFACT_MISSING
+    status=completed_missing_final_artifact
+  elif [ "$child_rc" -eq 124 ] && [ "$tool_count" -gt 0 ] && [ "$has_final" -eq 0 ]; then
+    outcome=TOOL_ONLY_NO_FINAL_ARTIFACT
+    status=timed_out_unknown
+  elif [ "$child_rc" -eq 124 ] && [ "$timeout_reason" = idle ]; then
+    outcome=IDLE_TIMEOUT
+    status=timed_out_unknown
+  elif [ "$child_rc" -eq 124 ] && [ "$timeout_reason" = max-runtime ]; then
+    outcome=MAX_RUNTIME
+    status=timed_out_unknown
+  elif [ "$child_rc" -eq 124 ]; then
+    outcome=TIMEOUT
+    status=timed_out_unknown
+  elif [ "$tool_count" -gt 0 ] && [ "$has_final" -eq 0 ]; then
+    outcome=AMBIGUOUS_PARTIAL
+    status=failed
+  else
+    outcome=FAILED
+    status=failed
+  fi
+
+  printf '%s' "$base" | jq --arg outcome "$outcome" --arg status "$status" \
+    --argjson has_final "$has_final" '
+    . + {
+      status: $status,
+      outcome: $outcome,
+      has_required_final_artifact: ($has_final == 1),
+      tool_count: (.tools | length),
+      text_chars: (.text | length)
+    }'
+}
+
 # ---- backend -----------------------------------------------------------------
 # ds-serve prints the URL of a backend *it* owns. It never hands back a foreign
 # server (e.g. an OpenCode TUI squatting on 4096) — attaching to one of those
@@ -161,17 +422,66 @@ if [ "$DS_SERVE" != "off" ]; then
   [ -n "$ATTACH" ] || note "shared backend unavailable, falling back to a one-shot process"
 fi
 
-# ---- command -----------------------------------------------------------------
-ARGS=(run --dir "$DIR" --agent "$AGENT" --model "$MODEL" --format json)
-[ -n "$ATTACH" ]  && ARGS+=(--attach "$ATTACH")
-[ -n "$VARIANT" ] && ARGS+=(--variant "$VARIANT")
-[ -n "$SESSION" ] && ARGS+=(--session "$SESSION")
-[ "$CONTINUE" -eq 1 ] && ARGS+=(--continue)
-[ "$DS_AUTO" = "1" ] && ARGS+=(--auto)
-for f in "${FILES[@]:-}"; do [ -n "$f" ] && ARGS+=(--file "$f"); done
-# `--file` is a yargs *array* option: without a `--` terminator it swallows the
-# prompt that follows it and the run dies with "File not found: <prompt>".
-ARGS+=(--)
+# ---- serving-model autodetect --------------------------------------------------
+# One model is loaded at a time, so /v1/models returns exactly that one.
+
+ds_provider_baseurl() {   # $1 = provider name; reads opencode.jsonc, the one home of the URL
+  local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.jsonc"
+  [ -f "$cfg" ] || return 1
+  jq -r --arg p "$1" '.provider[$p].options.baseURL // empty' "$cfg" 2>/dev/null
+}
+
+ds_detect_served_model() {   # $1 = baseURL ending in /v1; echoes the loaded model id
+  local body
+  body="$(curl -sS -m "$DS_MODEL_DETECT_TIMEOUT" "${1%/}/models" 2>/dev/null)" || return 1
+  [ -n "$body" ] || return 1
+  jq -er '.data[0].id // empty' <<<"$body" 2>/dev/null
+}
+
+ds_resolve_served_model() {
+  local provider="${MODEL%%/*}" configured="${MODEL#*/}" endpoint detected candidate
+  endpoint="$DS_MODEL_ENDPOINT"
+  if [ -z "$endpoint" ]; then
+    endpoint="$(ds_provider_baseurl "$provider")" || endpoint=""
+  fi
+  if [ -z "$endpoint" ]; then
+    note "autodetect: no baseURL for provider '$provider' in opencode.jsonc; keeping $MODEL"
+    return 0
+  fi
+  detected="$(ds_detect_served_model "$endpoint")" || {
+    note "autodetect: $endpoint unreachable; keeping configured $MODEL"
+    return 0
+  }
+  [ "$detected" = "$configured" ] && return 0
+  candidate="$provider/$detected"
+  if opencode models 2>/dev/null | grep -qxF "$candidate"; then
+    note "autodetect: $MODEL is not loaded; $endpoint serves $detected — using $candidate"
+    MODEL="$candidate"
+  else
+    note "autodetect: $endpoint serves '$detected', absent from the '$provider' catalog in opencode.jsonc; keeping $MODEL (add it there to use it)"
+  fi
+}
+
+# --model pins one model on purpose, so autodetect must not second-guess it.
+if [ "$EXPLICIT_MODEL" -eq 0 ] && [ "$DS_MODEL_AUTODETECT" = "1" ]; then
+  ds_resolve_served_model
+fi
+
+# ---- model chain --------------------------------------------------------------
+# --model given explicitly: run exactly that model, once, no fallback chain.
+# Otherwise: the role's primary model up to DS_MODEL_RETRIES times, then its
+# fallback model up to DS_MODEL_RETRIES times if one is configured (by default
+# none is, so the chain is primary-only). Stops at the first success.
+if [ "$EXPLICIT_MODEL" -eq 1 ]; then
+  MODEL_CHAIN=("$MODEL")
+else
+  MODEL_CHAIN=()
+  for _i in $(seq 1 "$DS_MODEL_RETRIES"); do MODEL_CHAIN+=("$MODEL"); done
+  if [ -n "$MODEL_FALLBACK" ]; then
+    for _i in $(seq 1 "$DS_MODEL_RETRIES"); do MODEL_CHAIN+=("$MODEL_FALLBACK"); done
+  fi
+fi
+CHAIN_LEN="${#MODEL_CHAIN[@]}"
 
 ENVELOPE="[supervisor task | role=${ROLE} | cwd=${DIR}]
 
@@ -181,80 +491,226 @@ Report using your required output format. If you cannot establish something,
 say so explicitly rather than filling the gap with a plausible guess."
 
 mkdir -p "$DS_STATE_DIR/runs"
-STAMP="$(date +%Y%m%d-%H%M%S)-$$"
-RAW="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.ndjson"
-ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.stderr"
 
-# macOS has no coreutils `timeout`; poll a background child instead.
-run_limited() {
-  local secs="$1"; shift
-  "$@" & local pid=$! waited=0 rc=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 2
-      kill -KILL "$pid" 2>/dev/null || true
-      return 124
+# Safety guard for the writing `worker` role only: a timeout/failure can land
+# after a partial edit, so the chain may only continue while --dir is provably
+# unchanged since it started. Not a git working tree = provably nothing, so
+# that also stops the chain (see ds_git_status_snapshot).
+WORKER_SAFETY_BASELINE=""
+[ "$ROLE" = worker ] && [ "$EXPLICIT_MODEL" -eq 0 ] \
+  && WORKER_SAFETY_BASELINE="$(ds_git_status_snapshot "$DIR")"
+CHAIN_STOP_REASON=""
+ATTEMPTS_SUMMARY=()
+ATTEMPT_INDEX=0
+
+for MODEL in "${MODEL_CHAIN[@]}"; do
+  ATTEMPT_INDEX=$((ATTEMPT_INDEX + 1))
+
+  # ---- command -----------------------------------------------------------------
+  STAMP="$(date +%Y%m%d-%H%M%S)-$$-a${ATTEMPT_INDEX}"
+  RAW="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.ndjson"
+  ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.stderr"
+
+  ARGS=(run --dir "$DIR" --agent "$AGENT" --model "$MODEL" --format json)
+  [ -n "$ATTACH" ]  && ARGS+=(--attach "$ATTACH")
+  [ -n "$VARIANT" ] && ARGS+=(--variant "$VARIANT")
+  [ -n "$SESSION" ] && ARGS+=(--session "$SESSION")
+  [ "$CONTINUE" -eq 1 ] && ARGS+=(--continue)
+  [ "$DS_AUTO" = "1" ] && ARGS+=(--auto)
+  for f in "${FILES[@]:-}"; do [ -n "$f" ] && ARGS+=(--file "$f"); done
+  # `--file` is a yargs *array* option: without a `--` terminator it swallows the
+  # prompt that follows it and the run dies with "File not found: <prompt>".
+  ARGS+=(--)
+
+  PROGRESS_INTERVAL_EFFECTIVE="$DS_PROGRESS_INTERVAL"
+  [ "$QUIET" -eq 1 ] && PROGRESS_INTERVAL_EFFECTIVE=0
+  PROGRESS_STOP="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.progress.stop"
+  DS_PROGRESS_PID=""
+  [ "$QUIET" -eq 1 ] || note "attempt $ATTEMPT_INDEX/$CHAIN_LEN role=$ROLE model=$MODEL raw_stream=$RAW"
+  ds_start_progress_monitor "$RAW" "$PROGRESS_STOP" "$PROGRESS_INTERVAL_EFFECTIVE"
+  RC=0
+  ds_run_with_watchdog "$DS_IDLE_TIMEOUT" "$DS_MAX_RUNTIME" "$RAW" "$ERR" \
+    opencode "${ARGS[@]}" "$ENVELOPE" || RC=$?
+  ds_stop_progress_monitor "$PROGRESS_STOP"
+
+  if [ "$RC" -eq 124 ]; then
+    note "attempt $ATTEMPT_INDEX/$CHAIN_LEN timed out (${DS_WATCHDOG_REASON}) after idle=${DS_IDLE_TIMEOUT}s max=${DS_MAX_RUNTIME}s (partial stream: $RAW)"
+  fi
+
+  if grep -q "Falling back to default agent" "$ERR" 2>/dev/null; then
+    note "opencode ignored --agent $AGENT and ran the UNRESTRICTED default agent."
+    note "the sandbox for role '$ROLE' did not apply. stderr: $ERR"
+    note "fix: re-run install.sh (agent files must be real files, not symlinks)"
+    exit 3
+  fi
+
+  # ---- parse -------------------------------------------------------------------
+  INITIAL_TIMEOUT_REASON=none
+  [ "$RC" -eq 124 ] && INITIAL_TIMEOUT_REASON="${DS_WATCHDOG_REASON:-unknown}"
+  INITIAL_RESULT="$(ds_build_result "$RAW" "$RC" "$INITIAL_TIMEOUT_REASON" initial "$ERR" "$DS_IDLE_TIMEOUT" "$DS_MAX_RUNTIME")"
+  INITIAL_TEXT="$(printf '%s' "$INITIAL_RESULT" | jq -r '.text')"
+  INITIAL_SESSION="$(printf '%s' "$INITIAL_RESULT" | jq -r '.session // empty')"
+  INITIAL_HAS_FINAL="$(printf '%s' "$INITIAL_RESULT" | jq -r 'if .has_required_final_artifact then 1 else 0 end')"
+  INITIAL_OUTCOME="$(printf '%s' "$INITIAL_RESULT" | jq -r '.outcome')"
+  INITIAL_STATUS="$(printf '%s' "$INITIAL_RESULT" | jq -r '.status')"
+  INITIAL_TIMEOUT_REASON="$(printf '%s' "$INITIAL_RESULT" | jq -r '.timeout_reason // empty')"
+
+  FINAL_RESULT="$INITIAL_RESULT"
+  FINAL_TEXT="$INITIAL_TEXT"
+  FINAL_RC="$RC"
+  RECOVERY_ATTEMPTED=0
+  RECOVERY_SUCCEEDED=0
+  RECOVERY_RAW=""
+  RECOVERY_ERR=""
+  RECOVERY_RC=0
+  RECOVERY_EXIT_JSON=null
+  RECOVERY_OUTCOME=""
+  RECOVERY_TIMEOUT_REASON=""
+
+  if [ "$DS_AUTO_RECOVER_READONLY" -eq 1 ] && ds_is_read_only_role \
+     && [ "$INITIAL_HAS_FINAL" -eq 0 ] && [ -n "$INITIAL_SESSION" ]; then
+    RECOVERY_ATTEMPTED=1
+    RECOVERY_RAW="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.ndjson"
+    RECOVERY_ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.stderr"
+    RECOVERY_STOP="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.progress.stop"
+    RECOVERY_PROMPT="Your previous read-only ${ROLE} run ended before emitting the required final report. Do not use tools or perform more searches. Using only the work already completed in this session, emit the required ${ROLE} report now in the exact required format. If evidence is incomplete, say so explicitly in the required gap section. Do not claim verification without evidence."
+    RECOVERY_ARGS=(run --dir "$DIR" --agent "$AGENT" --model "$MODEL" --format json)
+    [ -n "$ATTACH" ] && RECOVERY_ARGS+=(--attach "$ATTACH")
+    [ -n "$VARIANT" ] && RECOVERY_ARGS+=(--variant "$VARIANT")
+    RECOVERY_ARGS+=(--session "$INITIAL_SESSION")
+    [ "$DS_AUTO" = "1" ] && RECOVERY_ARGS+=(--auto)
+    for f in "${FILES[@]:-}"; do [ -n "$f" ] && RECOVERY_ARGS+=(--file "$f"); done
+    RECOVERY_ARGS+=(--)
+
+    [ "$QUIET" -eq 1 ] || note "read-only recovery attempt session=$INITIAL_SESSION raw_stream=$RECOVERY_RAW"
+    DS_PROGRESS_PID=""
+    ds_start_progress_monitor "$RECOVERY_RAW" "$RECOVERY_STOP" "$PROGRESS_INTERVAL_EFFECTIVE"
+    RECOVERY_RC=0
+    ds_run_with_watchdog "$DS_RECOVERY_IDLE_TIMEOUT" "$DS_RECOVERY_MAX_RUNTIME" "$RECOVERY_RAW" "$RECOVERY_ERR" \
+      opencode "${RECOVERY_ARGS[@]}" "$RECOVERY_PROMPT" || RECOVERY_RC=$?
+    ds_stop_progress_monitor "$RECOVERY_STOP"
+    if grep -q "Falling back to default agent" "$RECOVERY_ERR" 2>/dev/null; then
+      note "opencode ignored --agent $AGENT during read-only recovery and ran the UNRESTRICTED default agent."
+      note "the recovery sandbox did not apply. stderr: $RECOVERY_ERR"
+      exit 3
     fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid" || rc=$?
-  return $rc
-}
+    RECOVERY_TIMEOUT_REASON=none
+    [ "$RECOVERY_RC" -eq 124 ] && RECOVERY_TIMEOUT_REASON="${DS_WATCHDOG_REASON:-unknown}"
+    RECOVERY_RESULT="$(ds_build_result "$RECOVERY_RAW" "$RECOVERY_RC" "$RECOVERY_TIMEOUT_REASON" recovery "$RECOVERY_ERR" "$DS_RECOVERY_IDLE_TIMEOUT" "$DS_RECOVERY_MAX_RUNTIME")"
+    RECOVERY_OUTCOME="$(printf '%s' "$RECOVERY_RESULT" | jq -r '.outcome')"
+    RECOVERY_HAS_FINAL="$(printf '%s' "$RECOVERY_RESULT" | jq -r 'if .has_required_final_artifact then 1 else 0 end')"
+    RECOVERY_EXIT_JSON="$RECOVERY_RC"
 
-RC=0
-run_limited "$DS_TIMEOUT" opencode "${ARGS[@]}" "$ENVELOPE" >"$RAW" 2>"$ERR" || RC=$?
+    if [ "$RECOVERY_RC" -eq 0 ] && [ "$RECOVERY_HAS_FINAL" -eq 1 ]; then
+      RECOVERY_SUCCEEDED=1
+      FINAL_RESULT="$RECOVERY_RESULT"
+      FINAL_TEXT="$(printf '%s' "$RECOVERY_RESULT" | jq -r '.text')"
+      FINAL_RC=0
+    else
+      FINAL_TEXT="$INITIAL_TEXT"
+      [ "$RC" -eq 0 ] && FINAL_RC=4
+    fi
+  elif [ "$RC" -eq 0 ] && [ "$INITIAL_HAS_FINAL" -eq 0 ]; then
+    FINAL_RC=4
+  fi
 
-if [ "$RC" -eq 124 ]; then
-  note "timed out after ${DS_TIMEOUT}s (partial stream: $RAW)"
-fi
+  ATTEMPTS_SUMMARY+=("$(jq -nc --argjson n "$ATTEMPT_INDEX" --arg model "$MODEL" \
+    --argjson exit "$RC" --arg outcome "$INITIAL_OUTCOME" \
+    --argjson recovered "$RECOVERY_SUCCEEDED" --argjson wrapper_exit "$FINAL_RC" '
+    {attempt: $n, model: $model, exit: $exit, outcome: $outcome,
+     recovered: ($recovered == 1), wrapper_exit: $wrapper_exit}')")
 
-if grep -q "Falling back to default agent" "$ERR" 2>/dev/null; then
-  note "opencode ignored --agent $AGENT and ran the UNRESTRICTED default agent."
-  note "the sandbox for role '$ROLE' did not apply. stderr: $ERR"
-  note "fix: re-run install.sh (agent files must be real files, not symlinks)"
-  exit 3
-fi
+  [ "$FINAL_RC" -eq 0 ] && break
 
-# ---- parse -------------------------------------------------------------------
-# The stream is NDJSON: one event object per line, types step_start / text /
-# step_finish / tool. Non-JSON lines (warnings) are dropped rather than fatal.
-RESULT="$(jq -R 'fromjson? // empty' <"$RAW" | jq -s --arg role "$ROLE" \
-  --arg model "$MODEL" --arg dir "$DIR" --arg raw "$RAW" --argjson rc "$RC" '
-  {
-    role:    $role,
-    model:   $model,
-    dir:     $dir,
-    exit:    $rc,
-    session: (map(.sessionID // empty) | last // null),
-    text:    (map(select(.type == "text") | .part.text // "") | join("")),
-    tools:   (map(select(.type == "tool_use")
-                  | (.part.tool // "tool"))),
-    tokens:  (map(select(.type == "step_finish") | .part.tokens // empty) | last),
-    cost:    ((map(select(.type == "step_finish") | .part.cost // 0) | add) // 0),
-    events:  length,
-    raw_log: $raw
+  if [ "$ROLE" = worker ] && [ "$EXPLICIT_MODEL" -eq 0 ] && [ "$ATTEMPT_INDEX" -lt "$CHAIN_LEN" ]; then
+    if [ "$WORKER_SAFETY_BASELINE" = "__not_a_git_repo__" ]; then
+      CHAIN_STOP_REASON="--dir is not a git working tree; cannot confirm attempt $ATTEMPT_INDEX made no partial edits, so the fallback chain stops here rather than risk a duplicate edit."
+      note "$CHAIN_STOP_REASON"
+      break
+    fi
+    CURRENT_SNAPSHOT="$(ds_git_status_snapshot "$DIR")"
+    if [ "$CURRENT_SNAPSHOT" != "$WORKER_SAFETY_BASELINE" ]; then
+      CHAIN_STOP_REASON="attempt $ATTEMPT_INDEX (model=$MODEL) left uncommitted changes in $DIR; stopping the fallback chain instead of risking a conflicting edit. Inspect with: git -C \"$DIR\" status"
+      note "$CHAIN_STOP_REASON"
+      break
+    fi
+  fi
+done
+
+FALLBACK_USED=0
+[ "$ATTEMPT_INDEX" -gt "$DS_MODEL_RETRIES" ] && FALLBACK_USED=1
+ATTEMPTS_JSON="$(printf '%s\n' "${ATTEMPTS_SUMMARY[@]}" | jq -s '.')"
+
+FINAL_RESULT="$(printf '%s' "$FINAL_RESULT" | jq \
+  --argjson wrapper_exit "$FINAL_RC" \
+  --argjson recovery_attempted "$RECOVERY_ATTEMPTED" \
+  --argjson recovery_succeeded "$RECOVERY_SUCCEEDED" \
+  --argjson initial_exit "$RC" \
+  --arg initial_outcome "$INITIAL_OUTCOME" \
+  --arg initial_status "$INITIAL_STATUS" \
+  --arg initial_timeout_reason "$INITIAL_TIMEOUT_REASON" \
+  --arg initial_raw_log "$RAW" \
+  --arg initial_stderr_log "$ERR" \
+  --arg recovery_raw_log "$RECOVERY_RAW" \
+  --arg recovery_stderr_log "$RECOVERY_ERR" \
+  --arg recovery_outcome "$RECOVERY_OUTCOME" \
+  --arg recovery_timeout_reason "$RECOVERY_TIMEOUT_REASON" \
+  --argjson recovery_exit "$RECOVERY_EXIT_JSON" \
+  --argjson attempts "$ATTEMPTS_JSON" \
+  --argjson attempt_count "$ATTEMPT_INDEX" \
+  --argjson chain_length "$CHAIN_LEN" \
+  --argjson fallback_used "$FALLBACK_USED" \
+  --arg chain_stop_reason "$CHAIN_STOP_REASON" '
+  . + {
+    wrapper_exit: $wrapper_exit,
+    recovered: ($recovery_succeeded == 1),
+    recovery_attempted: ($recovery_attempted == 1),
+    recovery_succeeded: ($recovery_succeeded == 1),
+    initial_exit: $initial_exit,
+    initial_outcome: $initial_outcome,
+    initial_status: $initial_status,
+    initial_timeout_reason: (if $initial_timeout_reason == "" then null else $initial_timeout_reason end),
+    initial_raw_log: $initial_raw_log,
+    initial_stderr_log: $initial_stderr_log,
+    recovery_raw_log: (if $recovery_raw_log == "" then null else $recovery_raw_log end),
+    recovery_stderr_log: (if $recovery_stderr_log == "" then null else $recovery_stderr_log end),
+    recovery_outcome: (if $recovery_outcome == "" then null else $recovery_outcome end),
+    recovery_timeout_reason: (if $recovery_timeout_reason == "" then null else $recovery_timeout_reason end),
+    recovery_exit: (if $recovery_attempted == 1 then $recovery_exit else null end),
+    attempts: $attempts,
+    attempt_count: $attempt_count,
+    chain_length: $chain_length,
+    fallback_used: ($fallback_used == 1),
+    chain_stop_reason: (if $chain_stop_reason == "" then null else $chain_stop_reason end)
   }')"
 
-TEXT="$(printf '%s' "$RESULT" | jq -r '.text')"
-
 case "$OUT_MODE" in
-  raw)  cat "$RAW" ;;
-  json) printf '%s\n' "$RESULT" ;;
+  raw)
+    cat "$RAW"
+    if [ "$RECOVERY_ATTEMPTED" -eq 1 ] && [ -f "$RECOVERY_RAW" ]; then cat "$RECOVERY_RAW"; fi
+    ;;
+  json)
+    printf '%s\n' "$FINAL_RESULT"
+    ;;
   text)
-    if [ -n "$TEXT" ]; then
-      printf '%s\n' "$TEXT"
+    if [ -n "$FINAL_TEXT" ]; then
+      printf '%s\n' "$FINAL_TEXT"
     else
       note "no text output; stderr follows"
       sed -n '1,40p' "$ERR" >&2
+      if [ "$RECOVERY_ATTEMPTED" -eq 1 ] && [ -f "$RECOVERY_ERR" ]; then
+        sed -n '1,40p' "$RECOVERY_ERR" >&2
+      fi
     fi
     ;;
 esac
 
 if [ "$QUIET" -eq 0 ] && [ "$OUT_MODE" != "raw" ]; then
-  printf '%s' "$RESULT" | jq -r '
+  printf '%s' "$FINAL_RESULT" | jq -r '
     "--\nrole=\(.role) model=\(.model) session=\(.session // "-") " +
-    "tools=\(.tools | length) cost=$\(.cost) log=\(.raw_log)"' >&2
+    "status=\(.status) outcome=\(.outcome) tools=\(.tool_count) " +
+    "recovered=\(.recovered) wrapper_exit=\(.wrapper_exit) " +
+    "attempt=\(.attempt_count)/\(.chain_length) fallback_used=\(.fallback_used) raw_log=\(.raw_log)"' >&2
 fi
 
-exit "$RC"
+exit "$FINAL_RC"

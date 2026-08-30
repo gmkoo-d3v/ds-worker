@@ -47,7 +47,7 @@ Attaching:
 
 ```bash
 opencode run --attach http://127.0.0.1:4096 --dir "$PWD" \
-  --agent ds-explorer --model gx10-8888/qwen3.8-27b -- "..."
+  --agent ds-explorer --model gx10/deepseek-v4-flash-exl3-cross -- "..."
 ```
 
 ## `--format json` output shape (measured)
@@ -179,16 +179,48 @@ still does not let bash run (measured: `NO_BASH`, zero tool calls).
 **`--auto` cannot override `deny`.** But if any of traps 1–4 applies, the agent
 itself never took effect, and this guarantee disappears with it.
 
-## Models (actually available on this machine)
+## Models (catalog vs. actually loaded)
+
+The GX10 box serves ONE model at a time on `:8000` behind the single `gx10`
+provider. The list below is the catalog in `opencode.jsonc`, not what is live.
+ds-worker resolves the live one itself (see `DS_MODEL_AUTODETECT`); to check by
+hand: `curl -s http://localhost:8000/v1/models`
+
+Adding an entry here is not enough on its own: `opencode serve` snapshots the
+config at startup, so run `ds-serve restart` afterwards. Against a stale backend
+the new model fails as `UnknownError: Unexpected server error`, with nothing in
+the stream to say the model is simply unknown to it. Confirm what a backend
+actually knows with: `curl -s "$(ds-serve url)/config" | jq '.provider.gx10.models | keys'`
 
 ```
-gx10-8888/qwen3.8-27b                # local GX10 box, :8888 — default explorer/reviewer/worker
-gx10/gemma4-26b-a4b-sglang           # local GX10 box, :8000 — alternate, not Qwen
-opencode/deepseek-v4-flash-free      # cloud free tier, unused by default
+gx10/deepseek-v4-flash-exl3-cross  # local GX10 box, :8000 (vLLM) — default primary, all roles; no fallback
+gx10/qwen3.8-27b                   # same box/port — only when it is the loaded model
+gx10/gemma4-26b-a4b-fp8            # same box/port — only when it is the loaded model
+opencode/deepseek-v4-flash-free         # cloud free tier, unused by default
 ```
 
 Provider config (baseURL, timeouts) lives in `~/.config/opencode/opencode.jsonc`
-under `provider.gx10`. This changes. Check with `opencode models | grep gx10`.
+under the provider used by the selected model. Check the resolved provider with
+`opencode models | grep gx10` and `opencode debug config`. For a slow local
+reasoning model, the relevant options are:
+
+```jsonc
+{
+  "provider": {
+    "<local-provider-id>": {
+      "options": {
+        "chunkTimeout": 60000,
+        "timeout": 1800000
+      }
+    }
+  }
+}
+```
+
+`chunkTimeout` is the maximum gap between streamed response chunks, not a
+per-token timer. `timeout` is the provider request's absolute wall-clock cap.
+After changing either option, restart the backend owned by this skill:
+`ds-serve restart`.
 
 ## OmO Slim (optional)
 
