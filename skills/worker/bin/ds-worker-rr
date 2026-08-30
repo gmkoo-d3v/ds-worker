@@ -13,6 +13,8 @@
 # wrapper only injects --model unless the caller already passed one.
 set -euo pipefail
 
+# One entry = no rotation; see the single-entry short-circuit below, which
+# delegates to ds-worker's autodetect instead of pinning this name.
 MODELS=(
   "gx10/deepseek-v4-flash-exl3-cross"
 )
@@ -41,4 +43,13 @@ idx=$(( n % ${#MODELS[@]} ))
 echo $(( n + 1 )) > "$COUNTER_FILE"
 
 model="${MODELS[$idx]}"
+
+# A single-entry list has nothing to rotate, and injecting --model would pin a
+# model name that goes stale the moment a different one is loaded — worse, it
+# disables ds-worker's serving-model autodetect. Delegate without --model and
+# let ds-worker resolve what is actually live.
+if [ "${#MODELS[@]}" -eq 1 ]; then
+  exec ds-worker "$role" "$@"
+fi
+
 exec ds-worker "$role" --model "$model" "$@"
