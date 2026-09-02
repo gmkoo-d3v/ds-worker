@@ -34,12 +34,17 @@ that are hard to undo, anything you will say to the user, commits, pushes, PRs.
 
 ```bash
 ds-worker <role> [--dir <path>] "<instruction>"
+ds-worker omo <agent> [--dir <path>] "<instruction>"
 ```
 
 ```bash
 ds-worker explorer "Find every call site of checkToken in src/ — list all of them, not a sample. file:line required."
 ds-worker reviewer --file test.log "Rank the root-cause candidates for this failure, reading the log to its end."
 ds-worker worker "checkToken at src/auth.ts:42 returns 500 for an expired token instead of 401. Make it 401. Verify: npm test -- auth"
+ds-worker omo oracle "Review this design for failure modes."
+ds-worker omo council "Debate whether to split the auth service."
+ds-worker omo ds-explorer "Find every call site of checkToken in src/."
+ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
 ```
 
 Main options: `--dir` working directory · `--model` override · `--session <id>` continue
@@ -77,6 +82,21 @@ bypasses this chain and runs exactly that model once. For the writing
 `worker` role, the chain only continues while `--dir` is a git working tree
 confirmed unchanged since the chain started — see "Never treat the result as
 fact" below for why a writing role does not retry blindly otherwise.
+
+The `omo` gateway has a strict allowlist: `oracle`, `council`, `librarian`,
+`designer`, `fixer`, `ds-explorer`, and `ds-reviewer`. OMO built-ins run without
+`--model` by default, so the active OMO Slim preset chooses its model, variants,
+seat arrays, and external providers. The wrapper performs one OMO attempt and
+does not blindly retry a full Council. The five built-ins (`oracle`, `council`,
+`librarian`, `designer`, `fixer`) are OpenCode subagents, so each runs through
+the primary `orchestrator` with `task(subagent_type='<agent>')`: `council`
+collects every configured seat and synthesizes, the others request their named
+subagent once. A `(subagent)` mode in `opencode agent list` is expected for
+these built-ins and is only a problem if you pass such an agent directly to
+`opencode run --agent`; do not reinstall to "fix" it. The `ds-explorer`
+and `ds-reviewer` gateway aliases retain the local DS model and final-report
+contracts. `omo fixer` may edit files but does not receive the legacy writing
+worker's git-safety contract (it is still refused for `--dir $HOME` or `/`).
 
 ## Slow local reasoning models
 
@@ -126,12 +146,27 @@ once you (the supervisor) have the result back, never re-invoke a writing
 role yourself without first checking `git diff`/`git status` — see "When it
 fails" below.
 
-For `explorer` and `reviewer`, if a session id exists but the required final
-report is missing, the wrapper makes at most one continuation request without
-using tools or doing more searches. `recovered`, `initial_outcome`,
-`initial_exit`, and `initial_timeout_reason` make that first attempt visible.
-Set `DS_AUTO_RECOVER_READONLY=0` to disable it. Progress notices are numeric
-stderr diagnostics only; they never print raw model output.
+For `explorer` and `reviewer` (including the `ds-explorer` and `ds-reviewer`
+gateway aliases), if a session id exists but the required final report is
+missing, the wrapper owns **one** read-only recovery continuation on the same
+session. That continuation disables tools and Qwen thinking and reports only the
+evidence the session already produced — it never searches again. `recovered`,
+`initial_outcome`, `initial_exit`, and `initial_timeout_reason` make that first
+attempt visible. Set `DS_AUTO_RECOVER_READONLY=0` to disable it. Progress
+notices are numeric stderr diagnostics only; they never print raw model output.
+
+The initial read-only prompt also carries an advisory budget notice: treat any
+configured agentic-step limit as a safety ceiling, not a target or a tool-call
+quota, prioritize the highest-value evidence, and near the ceiling stop
+initiating new searches and emit the required report with explicit evidence
+gaps. The notice is guidance in the prompt only — the wrapper does not count or
+enforce tool calls, and `steps` is not a tool-call quota. Explicit gaps are the
+required way to end a read-only run that ran out of budget.
+
+JSON results include `agent` and `dispatch`. OMO-configured calls use
+`dispatch: "omo-configured"`, report `agent: "orchestrator"` (the OMO subagents
+are reached through it via `task(subagent_type=...)`), and report `model: null`
+when the preset selected the model; explicit `--model` reports the pinned model.
 
 ## Writing the instruction
 

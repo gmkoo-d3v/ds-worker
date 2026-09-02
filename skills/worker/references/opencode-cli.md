@@ -94,6 +94,27 @@ Permission keys: `read` `edit` `glob` `grep` `list` `bash` `task` `external_dire
 
 Inspection commands: `opencode agent list`, `opencode models`, `opencode auth list`.
 
+## OMO Slim gateway
+
+`ds-worker omo <agent> "..."` accepts only the following mapped agents:
+
+| Gateway agent | OpenCode dispatch | Model source |
+|---|---|---|
+| `oracle` / `council` / `librarian` / `designer` / `fixer` | `orchestrator` (they are `mode: subagent` and cannot be passed to `run --agent` directly) | active OMO Slim preset; `--model` omitted by default; prompt requests `task(subagent_type='<agent>')` |
+| `ds-explorer` | `ds-explorer` | existing ds-worker local model chain |
+| `ds-reviewer` | `ds-reviewer` | existing ds-worker local model chain |
+
+The wrapper rejects agents outside this allowlist before dispatch. OMO-configured
+calls make one wrapper attempt so OMO Slim owns its configured seat/model
+fallback; the wrapper must not blindly retry a full Council and duplicate
+external calls. `council` asks the orchestrator to collect every configured
+seat and synthesize; the other built-ins request their named subagent once.
+Seeing `(subagent)` next to an OMO built-in in `opencode agent list` is the
+expected mode — it is only invalid when such an agent is passed directly to
+`opencode run --agent`; do not reinstall to change it. `fixer` may write files,
+is refused for `--dir $HOME` or `/`, and does not carry the legacy worker
+role's git-safety retry contract.
+
 ## Traps — every one of these was hit in testing
 
 All six fail **silently**. No error; just a wrong result.
@@ -107,7 +128,10 @@ All six fail **silently**. No error; just a wrong result.
 One warning line on stderr, then it runs **the unrestricted default agent**. The
 prompt and the permissions both vanish. Combined with `--auto`, that is an
 unrestricted agent running unattended.
-→ Every agent in this skill is `mode: all`.
+→ Every agent in this skill is `mode: all`. OMO's built-ins are the exception:
+they legitimately ship as `mode: subagent`, which is fine because
+`ds-worker omo` never passes them to `run --agent` — it dispatches the primary
+`orchestrator` and requests them via `task(subagent_type=...)`.
 
 ### 2. Symlinked agent files are ignored at run time
 

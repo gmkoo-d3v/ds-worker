@@ -8,6 +8,16 @@
 #   explorer   read-only codebase mapping, repeated search, candidate gathering
 #   reviewer   read-only analysis of test logs, stack traces, diffs
 #   worker     tightly specified implementation (can edit files and run commands)
+#   omo        gateway to the OMO Slim agents (see "omo agents" below)
+#
+# omo agents (ds-worker omo <agent> "<prompt>"):
+#   oracle | council | librarian | designer | fixer | ds-explorer | ds-reviewer
+#   The active OMO Slim preset picks the model for oracle, council, librarian,
+#   designer and fixer — no --model is passed unless you give one explicitly.
+#   Those five built-ins are OpenCode subagents, so each dispatches the primary
+#   agent 'orchestrator' with a task(subagent_type='<agent>') instruction.
+#   ds-explorer and ds-reviewer keep their configured local model and
+#   final-report contract.
 #
 # The caller is the supervisor. Treat everything this prints as a claim to be
 # verified, not as an established fact.
@@ -123,8 +133,14 @@ die() { printf 'ds-worker: %s\n' "$1" >&2; exit 2; }
 note() { printf 'ds-worker: %s\n' "$1" >&2; }
 
 usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   cat >&2 <<'USAGE'
+
+Examples:
+  ds-worker omo oracle "Review this design for failure modes."
+  ds-worker omo council "Debate whether to split the auth service."
+  ds-worker omo ds-explorer "Find every call site of checkToken in src/."
+  ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
 
 Each role's model defaults to a primary/fallback chain: the primary model up to
 DS_MODEL_RETRIES times, then the fallback model up to DS_MODEL_RETRIES times,
@@ -152,6 +168,21 @@ options:
   --json              emit a JSON envelope instead of prose
   --raw               emit the raw NDJSON event stream
   --quiet             suppress the trailer on stderr
+
+omo gateway:
+  ds-worker omo <agent> [options] "<prompt>"
+  agents: oracle | council | librarian | designer | fixer | ds-explorer | ds-reviewer
+  For oracle, council, librarian, designer and fixer the model is left to the
+  active OMO Slim preset (which may select external models), so no --model is
+  passed and no local model autodetect or fallback chain runs — one attempt per
+  call; OMO Slim owns its configured seat/model fallback. --model still pins one
+  model exactly once. Those five built-ins are OpenCode subagents: each dispatches
+  the primary agent 'orchestrator' with a task(subagent_type='<agent>')
+  instruction (council asks for every configured seat and a synthesis; the others
+  ask for the named subagent once). ds-explorer and ds-reviewer keep
+  the configured local model, the fallback chain and the final-report contract.
+  fixer is a potentially WRITING OMO agent: it does not carry the writing
+  'worker' role's git-safety contract.
 USAGE
   exit 2
 }
@@ -159,12 +190,46 @@ USAGE
 [ $# -ge 1 ] || usage
 ROLE="$1"; shift
 
+# Internal requested-agent / dispatch-agent mapping. ROLE stays the public
+# result field; OMO_* drive the final-artifact check, the model choice and the
+# recovery decision.
+OMO_REQUESTED=""    # gateway agent the caller named (empty for legacy roles)
+OMO_CONFIGURED=0    # 1 = the active OMO Slim preset picks the model: no --model
+DS_ROLE=""          # for an omo call: which existing DS contract applies
+CONTRACT_ROLE=""    # role whose final-report contract applies ("" = none)
+DISPATCH="legacy"   # result metadata: legacy ds role or OMO gateway dispatch
+
 case "$ROLE" in
-  explorer) AGENT="ds-explorer"; MODEL="$DS_MODEL_EXPLORER"; MODEL_FALLBACK="$DS_MODEL_EXPLORER_FALLBACK" ;;
-  reviewer) AGENT="ds-reviewer"; MODEL="$DS_MODEL_REVIEWER"; MODEL_FALLBACK="$DS_MODEL_REVIEWER_FALLBACK" ;;
-  worker)   AGENT="ds-worker";   MODEL="$DS_MODEL_WORKER";   MODEL_FALLBACK="$DS_MODEL_WORKER_FALLBACK" ;;
+  explorer) AGENT="ds-explorer"; MODEL="$DS_MODEL_EXPLORER"; MODEL_FALLBACK="$DS_MODEL_EXPLORER_FALLBACK"; CONTRACT_ROLE="explorer" ;;
+  reviewer) AGENT="ds-reviewer"; MODEL="$DS_MODEL_REVIEWER"; MODEL_FALLBACK="$DS_MODEL_REVIEWER_FALLBACK"; CONTRACT_ROLE="reviewer" ;;
+  worker)   AGENT="ds-worker";   MODEL="$DS_MODEL_WORKER";   MODEL_FALLBACK="$DS_MODEL_WORKER_FALLBACK"; CONTRACT_ROLE="worker" ;;
+  omo)
+    DISPATCH="omo-configured"
+    # Strict allowlist: an internal mapping, never an arbitrary --agent value.
+    OMO_REQUESTED="${1:-}"
+    case "$OMO_REQUESTED" in
+      # The OMO built-ins are OpenCode subagents: `opencode run --agent <them>`
+      # is rejected, so dispatch the primary 'orchestrator' and ask it for the
+      # named subagent via task(subagent_type=...).
+      oracle|council|librarian|designer|fixer)
+        AGENT="orchestrator"; OMO_CONFIGURED=1 ;;
+      ds-explorer) AGENT="ds-explorer"; DS_ROLE="explorer"; CONTRACT_ROLE="explorer" ;;
+      ds-reviewer) AGENT="ds-reviewer"; DS_ROLE="reviewer"; CONTRACT_ROLE="reviewer" ;;
+      *) die "omo: unsupported agent '${OMO_REQUESTED:-<missing>}' (expected: oracle | council | librarian | designer | fixer | ds-explorer | ds-reviewer)" ;;
+    esac
+    shift
+    if [ "$OMO_CONFIGURED" -eq 1 ]; then
+      # No model to resolve: the OMO Slim preset owns model arrays, variants and
+      # external seats. An empty --model must never reach opencode.
+      MODEL=""; MODEL_FALLBACK=""
+    elif [ "$DS_ROLE" = "explorer" ]; then
+      MODEL="$DS_MODEL_EXPLORER"; MODEL_FALLBACK="$DS_MODEL_EXPLORER_FALLBACK"
+    else
+      MODEL="$DS_MODEL_REVIEWER"; MODEL_FALLBACK="$DS_MODEL_REVIEWER_FALLBACK"
+    fi
+    ;;
   -h|--help) usage ;;
-  *) die "unknown role '$ROLE' (expected: explorer | reviewer | worker)" ;;
+  *) die "unknown role '$ROLE' (expected: explorer | reviewer | worker | omo)" ;;
 esac
 
 DIR="$PWD"; VARIANT=""; SESSION=""; CONTINUE=0
@@ -231,15 +296,24 @@ esac
 
 DIR="$(cd "$DIR" 2>/dev/null && pwd)" || die "--dir does not exist"
 case "$DIR" in
-  "$HOME"|/) [ "$ROLE" = "worker" ] && die "refusing to run a writing worker with --dir $DIR" ;;
+  "$HOME"|/)
+    # The legacy writing worker, plus omo fixer: an OMO subagent that may write.
+    # fixer gets this refusal only — never the worker's git-status retry guard.
+    if [ "$ROLE" = "worker" ] \
+       || { [ "$ROLE" = "omo" ] && [ "$OMO_REQUESTED" = "fixer" ]; }; then
+      die "refusing to run a writing worker with --dir $DIR"
+    fi
+    ;;
 esac
 
 # `opencode run --agent <unknown>` does NOT fail — it warns on stderr and runs the
 # default agent, which has no permission restrictions. Same for a `mode: subagent`
 # agent. Either way our sandbox silently disappears, so check up front and again
-# after the run.
+# after the run. An OMO built-in is expected to be mode=subagent and is never
+# passed to `opencode run --agent` directly: the check below covers the dispatch
+# agent (orchestrator for the OMO built-ins), which must not be a subagent.
 AGENT_LINE="$(opencode agent list 2>/dev/null | grep "^${AGENT} " || true)"
-[ -n "$AGENT_LINE" ] || die "agent '$AGENT' is not installed. Run: $SELF_DIR/../install.sh"
+[ -n "$AGENT_LINE" ] || die "agent '$AGENT' is not installed. Run: $SELF_DIR/../../install.sh"
 case "$AGENT_LINE" in
   *"(subagent)"*) die "agent '$AGENT' is mode=subagent; 'opencode run --agent' cannot use it. Set mode: all and re-run install.sh" ;;
 esac
@@ -305,7 +379,13 @@ ds_stop_progress_monitor() {
 }
 
 ds_is_read_only_role() {
-  [ "$ROLE" = explorer ] || [ "$ROLE" = reviewer ]
+  # Only roles whose report contract AND safety are known: explorer, reviewer,
+  # and the DS roles reached through the omo gateway. Never an OMO-configured
+  # agent (a full Council dispatch must not be recovered automatically).
+  case "$CONTRACT_ROLE" in
+    explorer|reviewer) [ "$OMO_CONFIGURED" -eq 0 ] ;;
+    *) return 1 ;;
+  esac
 }
 
 # Safety guard for the writing `worker` role's fallback chain: a timeout or
@@ -321,7 +401,7 @@ ds_git_status_snapshot() {
 
 ds_has_required_final_artifact() {
   local text="$1" marker
-  case "$ROLE" in
+  case "$CONTRACT_ROLE" in
     explorer)
       for marker in '### SUMMARY' '### FINDINGS' '### SEARCH COVERAGE' '### GAPS'; do
         case "$text" in *"$marker"*) ;; *) return 1 ;; esac
@@ -337,7 +417,11 @@ ds_has_required_final_artifact() {
         case "$text" in *"$marker"*) ;; *) return 1 ;; esac
       done
       ;;
-    *) return 1 ;;
+    *)
+      # No ds-worker contract for this agent (the OMO-configured OMO agents):
+      # any text the run produced counts as its result.
+      [ -n "$text" ] || return 1
+      ;;
   esac
   return 0
 }
@@ -345,14 +429,23 @@ ds_has_required_final_artifact() {
 ds_build_result() {
   local raw_path="$1" child_rc="$2" timeout_reason="$3" phase="$4" stderr_path="$5"
   local idle_timeout="$6" max_runtime="$7"
-  local base text tool_count has_final=0 outcome status
+  local base text tool_count has_final=0 outcome status model_json
+  # An OMO-configured call has no model of ours to report: null, not "".
+  if [ -n "$MODEL" ]; then
+    model_json="$(jq -n --arg model "$MODEL" '$model')"
+  else
+    model_json='null'
+  fi
 
   base="$(jq -R 'fromjson? // empty' <"$raw_path" | jq -s \
-    --arg role "$ROLE" --arg model "$MODEL" --arg dir "$DIR" --arg raw "$raw_path" \
+    --arg role "$ROLE" --arg agent "$AGENT" --arg dispatch "$DISPATCH" --arg dir "$DIR" --arg raw "$raw_path" \
     --arg stderr "$stderr_path" --arg timeout_reason "$timeout_reason" --arg phase "$phase" \
+    --argjson model "$model_json" \
     --argjson rc "$child_rc" --arg idle_timeout "$idle_timeout" --arg max_runtime "$max_runtime" '
     {
       role: $role,
+      agent: $agent,
+      dispatch: $dispatch,
       model: $model,
       dir: $dir,
       exit: $rc,
@@ -463,17 +556,22 @@ ds_resolve_served_model() {
 }
 
 # --model pins one model on purpose, so autodetect must not second-guess it.
-if [ "$EXPLICIT_MODEL" -eq 0 ] && [ "$DS_MODEL_AUTODETECT" = "1" ]; then
+# An OMO-configured call has no model of ours at all: the preset chooses.
+if [ "$EXPLICIT_MODEL" -eq 0 ] && [ "$OMO_CONFIGURED" -eq 0 ] && [ "$DS_MODEL_AUTODETECT" = "1" ]; then
   ds_resolve_served_model
 fi
 
 # ---- model chain --------------------------------------------------------------
 # --model given explicitly: run exactly that model, once, no fallback chain.
+# An OMO-configured call: one attempt with no --model; OMO Slim owns its
+# configured seat/model fallback, so never retry a full Council blindly.
 # Otherwise: the role's primary model up to DS_MODEL_RETRIES times, then its
 # fallback model up to DS_MODEL_RETRIES times if one is configured (by default
 # none is, so the chain is primary-only). Stops at the first success.
 if [ "$EXPLICIT_MODEL" -eq 1 ]; then
   MODEL_CHAIN=("$MODEL")
+elif [ "$OMO_CONFIGURED" -eq 1 ]; then
+  MODEL_CHAIN=("")
 else
   MODEL_CHAIN=()
   for _i in $(seq 1 "$DS_MODEL_RETRIES"); do MODEL_CHAIN+=("$MODEL"); done
@@ -489,6 +587,45 @@ ${PROMPT}
 
 Report using your required output format. If you cannot establish something,
 say so explicitly rather than filling the gap with a plausible guess."
+
+# The OMO built-ins are subagents: dispatch the orchestrator and ask it for the
+# real OMO Slim task, so the seats and models come from the preset. council
+# collects every configured seat and synthesizes; the others run one subagent.
+if [ "$ROLE" = omo ] && [ "$OMO_CONFIGURED" -eq 1 ]; then
+  if [ "$OMO_REQUESTED" = council ]; then
+    ENVELOPE="[supervisor task | role=${ROLE} | agent=council | cwd=${DIR}]
+
+${PROMPT}
+
+Dispatch this through the OMO Slim Council now: task(subagent_type='council'),
+so every configured council seat answers, then synthesize their answers into
+one result. Do not answer from a single seat.
+
+Report using your required output format. If you cannot establish something,
+say so explicitly rather than filling the gap with a plausible guess."
+  else
+    ENVELOPE="[supervisor task | role=${ROLE} | agent=${OMO_REQUESTED} | cwd=${DIR}]
+
+${PROMPT}
+
+Dispatch this through OMO Slim now: task(subagent_type='${OMO_REQUESTED}'),
+requesting that one subagent, and return its result. Do not answer yourself and
+do not gather multiple seats.
+
+Report using your required output format. If you cannot establish something,
+say so explicitly rather than filling the gap with a plausible guess."
+  fi
+fi
+
+# Advisory only: a read-only run should spend its agentic-step ceiling on the
+# highest-value evidence and still emit a report. Nothing here parses or enforces
+# a step count, and the notice must never reach a writing role, an OMO-configured
+# built-in, or the recovery prompt.
+if ds_is_read_only_role; then
+  ENVELOPE="$ENVELOPE
+
+Read-only budget notice: Treat any configured agentic-step limit as a safety ceiling, not a target or a tool-call quota. Prioritize the highest-value evidence. Near the ceiling, stop initiating new searches and emit the required report with explicit evidence gaps; never end with tools only."
+fi
 
 mkdir -p "$DS_STATE_DIR/runs"
 
@@ -511,7 +648,9 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
   RAW="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.ndjson"
   ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.stderr"
 
-  ARGS=(run --dir "$DIR" --agent "$AGENT" --model "$MODEL" --format json)
+  # Never pass an empty --model: an OMO-configured call lets the preset choose.
+  ARGS=(run --dir "$DIR" --agent "$AGENT" --format json)
+  [ -n "$MODEL" ]   && ARGS+=(--model "$MODEL")
   [ -n "$ATTACH" ]  && ARGS+=(--attach "$ATTACH")
   [ -n "$VARIANT" ] && ARGS+=(--variant "$VARIANT")
   [ -n "$SESSION" ] && ARGS+=(--session "$SESSION")
@@ -573,20 +712,30 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
     RECOVERY_RAW="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.ndjson"
     RECOVERY_ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.stderr"
     RECOVERY_STOP="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.progress.stop"
-    RECOVERY_PROMPT="Your previous read-only ${ROLE} run ended before emitting the required final report. Do not use tools or perform more searches. Using only the work already completed in this session, emit the required ${ROLE} report now in the exact required format. If evidence is incomplete, say so explicitly in the required gap section. Do not claim verification without evidence."
-    RECOVERY_ARGS=(run --dir "$DIR" --agent "$AGENT" --model "$MODEL" --format json)
+    RECOVERY_PROMPT="Your previous read-only ${CONTRACT_ROLE} run ended before emitting the required final report. Do not use tools or perform more searches. Using only the work already completed in this session, emit the required ${CONTRACT_ROLE} report now in the exact required format. If evidence is incomplete, say so explicitly in the required gap section. Do not claim verification without evidence."
+    RECOVERY_ARGS=(run --dir "$DIR" --agent "$AGENT" --format json)
+    [ -n "$MODEL" ] && RECOVERY_ARGS+=(--model "$MODEL")
     [ -n "$ATTACH" ] && RECOVERY_ARGS+=(--attach "$ATTACH")
     [ -n "$VARIANT" ] && RECOVERY_ARGS+=(--variant "$VARIANT")
-    RECOVERY_ARGS+=(--session "$INITIAL_SESSION")
+    # Keep the explicit session id while marking this as a continuation. The
+    # former selects the exact timed-out session; the latter prevents OpenCode
+    # from treating recovery as a fresh run when the watchdog interrupted it.
+    RECOVERY_ARGS+=(--session "$INITIAL_SESSION" --continue)
     [ "$DS_AUTO" = "1" ] && RECOVERY_ARGS+=(--auto)
     for f in "${FILES[@]:-}"; do [ -n "$f" ] && RECOVERY_ARGS+=(--file "$f"); done
     RECOVERY_ARGS+=(--)
 
+    # Recovery only reports what the session already produced: no tools, no
+    # thinking. Scope the override to this child via `env` so the initial run
+    # and the rest of the chain never see it.
+    RECOVERY_CONFIG_CONTENT="$(jq -cn --arg agent "$AGENT" \
+      '{agent: {($agent): {tools: {"*": false}, options: {chat_template_kwargs: {enable_thinking: false}}}}}')"
     [ "$QUIET" -eq 1 ] || note "read-only recovery attempt session=$INITIAL_SESSION raw_stream=$RECOVERY_RAW"
     DS_PROGRESS_PID=""
     ds_start_progress_monitor "$RECOVERY_RAW" "$RECOVERY_STOP" "$PROGRESS_INTERVAL_EFFECTIVE"
     RECOVERY_RC=0
     ds_run_with_watchdog "$DS_RECOVERY_IDLE_TIMEOUT" "$DS_RECOVERY_MAX_RUNTIME" "$RECOVERY_RAW" "$RECOVERY_ERR" \
+      env OPENCODE_CONFIG_CONTENT="$RECOVERY_CONFIG_CONTENT" \
       opencode "${RECOVERY_ARGS[@]}" "$RECOVERY_PROMPT" || RECOVERY_RC=$?
     ds_stop_progress_monitor "$RECOVERY_STOP"
     if grep -q "Falling back to default agent" "$RECOVERY_ERR" 2>/dev/null; then

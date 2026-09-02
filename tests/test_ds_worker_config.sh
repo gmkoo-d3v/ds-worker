@@ -14,6 +14,8 @@ cat > "$CONFIG" <<'EOF'
 DS_TIMEOUT=111 # legacy
 DS_IDLE_TIMEOUT = "22"
 DS_MAX_RUNTIME=333
+DS_MODEL_AUTODETECT=0
+DS_MODEL_ENDPOINT=http://localhost:8000/v1
 DS_SERVE=off
 DS_STATE_DIR='~/state' # expands only for *DIR keys
 DS_PROGRESS_INTERVAL=44
@@ -42,6 +44,14 @@ printf '%s\n' "$output" | grep -Eq '^  DS_MAX_RUNTIME[[:space:]]+888[[:space:]]+
 }
 printf '%s\n' "$output" | grep -Eq '^  DS_PROGRESS_INTERVAL[[:space:]]+99[[:space:]]+environment$' || {
   printf 'environment progress interval did not win\n%s\n' "$output" >&2
+  exit 1
+}
+printf '%s\n' "$output" | grep -Eq '^  DS_MODEL_AUTODETECT[[:space:]]+0[[:space:]]+config file$' || {
+  printf 'model autodetect config was not reported\n%s\n' "$output" >&2
+  exit 1
+}
+printf '%s\n' "$output" | grep -Eq '^  DS_MODEL_ENDPOINT[[:space:]]+http://localhost:8000/v1[[:space:]]+config file$' || {
+  printf 'model endpoint config was not reported\n%s\n' "$output" >&2
   exit 1
 }
 printf '%s\n' "$output" | grep -Eq '^  DS_AUTO_RECOVER_READONLY[[:space:]]+0[[:space:]]+config file$' || {
