@@ -11,10 +11,10 @@ running on OpenCode headless.
         └────────────┬─────────────┘
                      │ ds-worker (Bash)
         ┌────────────▼─────────────┐
-        │ opencode serve :4096     │  resident backend (no cold boot)
-        │ (+ OmO Slim, optional)   │
-        └────────────┬─────────────┘
-                     │ opencode run --attach --agent [--model]
+        │ opencode run (one-shot) │  no shared control port
+        │ (+ OmO Slim, optional)  │
+        └────────────┬────────────┘
+                     │ --agent [--model]
        ┌─────────────┼─────────────┐
        ▼             ▼             ▼
   ds-explorer   ds-worker    ds-reviewer
@@ -55,7 +55,7 @@ ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
 ```
 
 ```bash
-ds-serve start|status|stop    # resident backend (ds-worker starts it on demand)
+ds-serve start|status|stop    # optional manual resident backend for TUI observation
 ```
 
 ## Configuration
@@ -90,7 +90,7 @@ and ignored, and nothing in it is executed.
 | `DS_RECOVERY_IDLE_TIMEOUT` / `DS_RECOVERY_MAX_RUNTIME` | `60` / `180` seconds |
 | `DS_OPENCODE_HOST` / `DS_OPENCODE_PORT` | `127.0.0.1` / `4096` (scans upward if busy) |
 | `DS_PORT_SCAN` | `20` (ports tried from `DS_OPENCODE_PORT`) |
-| `DS_SERVE` | `auto` (`off` spawns a fresh process per call) |
+| `DS_SERVE` | `off` (`auto` opts into a shared backend) |
 | `DS_AUTO` | `1` (passes `--auto`) |
 | `DS_STATE_DIR` | `~/.local/state/ds-worker` |
 
@@ -192,7 +192,7 @@ this behavior with `DS_AUTO_RECOVER_READONLY=0`.
 ## After editing an agent definition
 
 ```bash
-./install.sh      # copies real files + clears the resident backend
+./install.sh      # copies real files
 ```
 
 Symlinked definitions appear in `opencode agent list` but are ignored at run time.

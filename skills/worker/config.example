@@ -87,7 +87,7 @@
 #                  0 disables this outer idle watchdog
 # DS_MAX_RUNTIME   absolute wall-clock limit for one call (exit 124)
 # DS_TIMEOUT       legacy alias for DS_MAX_RUNTIME
-# DS_SERVE    auto = reuse a shared backend, off = fresh process per call
+# DS_SERVE    off = fresh process per call (default), auto = opt-in shared backend
 # DS_AUTO     1 = pass --auto. Required for headless runs; it cannot override a
 #             `deny` in an agent definition, which is what keeps the read-only
 #             roles read-only. Set to 0 only when debugging permission prompts.
@@ -102,7 +102,7 @@
 #DS_AUTO_RECOVER_READONLY=1
 #DS_RECOVERY_IDLE_TIMEOUT=60
 #DS_RECOVERY_MAX_RUNTIME=180
-#DS_SERVE=auto
+#DS_SERVE=off
 #DS_AUTO=1
 
 # --- backend ----------------------------------------------------------------

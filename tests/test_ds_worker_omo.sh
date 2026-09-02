@@ -93,8 +93,8 @@ export PATH="$FAKE_BIN:$PATH"
 export DS_TEST_ARGV_DIR="$ARGV_DIR"
 export DS_STATE_DIR="$STATE_DIR"
 export DS_CONFIG="$TEST_ROOT/no-such-config"
-# Keep the gateway away from the shared backend and from endpoint probing.
-export DS_SERVE=off
+# The default gateway must stay away from the shared backend; this deliberately
+# leaves DS_SERVE unset so the production default is covered.
 export DS_MODEL_AUTODETECT=0
 export DS_MODEL_ENDPOINT="http://stub.invalid:8000/v1"
 export DS_MODEL_EXPLORER="test/local-model"

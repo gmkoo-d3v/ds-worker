@@ -16,7 +16,7 @@ ds_default() {
     DS_TIMEOUT)        echo 3600 ;;
     DS_IDLE_TIMEOUT)   echo 60 ;;
     DS_MAX_RUNTIME)    echo 3600 ;;
-    DS_SERVE)          echo auto ;;
+    DS_SERVE)          echo off ;;
     DS_AUTO)           echo 1 ;;
     DS_OPENCODE_HOST)  echo 127.0.0.1 ;;
     DS_OPENCODE_PORT)  echo 4096 ;;

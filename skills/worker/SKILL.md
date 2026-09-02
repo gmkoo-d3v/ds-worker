@@ -68,12 +68,10 @@ model is actually loaded and uses that — load Qwen instead of DeepSeek on
 present in the provider's catalog in `opencode.jsonc`; otherwise it keeps the
 configured pin and says why. Set `DS_MODEL_AUTODETECT=0` to disable.
 
-After ADDING a model to `opencode.jsonc`, restart the shared backend
-(`ds-serve restart`). It reads the config once at startup, so a long-lived
-backend keeps serving the old catalog and calls to the new model fail with
-`UnknownError: Unexpected server error` — which looks like a model or network
-fault but is a stale backend. `ds-doctor` compares them: its `serving now:` line
-is the live endpoint, the `model` lines are what is configured.
+The default worker path is one-shot and does not use a shared OpenCode control
+port. If `DS_SERVE=auto` is explicitly enabled, restart the shared backend
+(`ds-serve restart`) after changing `opencode.jsonc`; a long-lived backend
+snapshots the config and can otherwise keep an old model catalog.
 
 Each role tries its resolved model up to `DS_MODEL_RETRIES` times (default 2),
 then its fallback model up to `DS_MODEL_RETRIES` more times if one is set —
@@ -107,7 +105,8 @@ OpenCode's provider options have two separate protections:
 - `timeout` is the provider request's absolute wall-clock limit.
 
 For a local provider (DeepSeek or Qwen), configure those options in OpenCode's
-provider configuration, then restart the owned backend with `ds-serve restart`.
+provider configuration. If `DS_SERVE=auto` is explicitly enabled, restart the
+owned backend with `ds-serve restart`.
 The worker wrapper adds a second boundary:
 
 - `--idle-timeout` resets on every OpenCode NDJSON output write, including

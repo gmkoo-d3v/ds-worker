@@ -76,4 +76,11 @@ printf '%s\n' "$legacy_output" | grep -Eq '^  DS_MAX_RUNTIME[[:space:]]+123[[:sp
   exit 1
 }
 
+default_output="$(env -i HOME="$TEST_ROOT/home" PATH="/opt/homebrew/bin:/usr/bin:/bin" \
+  DS_CONFIG="$TEST_ROOT/no-config" "$DOCTOR" --config)"
+printf '%s\n' "$default_output" | grep -Eq '^  DS_SERVE[[:space:]]+off[[:space:]]+default$' || {
+  printf 'shared backend must be opt-in by default\n%s\n' "$default_output" >&2
+  exit 1
+}
+
 printf 'ds-worker config precedence: PASS\n'
