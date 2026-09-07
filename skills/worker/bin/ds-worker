@@ -100,7 +100,7 @@ ds_load_config
 
 DS_STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
 DS_TIMEOUT="${DS_TIMEOUT:-3600}"          # legacy alias for max runtime
-DS_IDLE_TIMEOUT="${DS_IDLE_TIMEOUT:-60}" # 0 disables the outer idle watchdog
+DS_IDLE_TIMEOUT="${DS_IDLE_TIMEOUT:-1200}" # 0 disables the outer idle watchdog
 DS_MAX_RUNTIME="${DS_MAX_RUNTIME:-$DS_TIMEOUT}"
 DS_SERVE="${DS_SERVE:-off}"           # off by default; auto is opt-in
 DS_AUTO="${DS_AUTO:-1}"               # 1 = pass --auto (required for headless)

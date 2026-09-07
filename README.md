@@ -82,7 +82,7 @@ and ignored, and nothing in it is executed.
 | `DS_MODEL_EXPLORER` / `DS_MODEL_REVIEWER` / `DS_MODEL_WORKER` | `gx10-8000/deepseek-v4-flash-exl3-cross` (primary) |
 | `DS_MODEL_EXPLORER_FALLBACK` / `DS_MODEL_REVIEWER_FALLBACK` / `DS_MODEL_WORKER_FALLBACK` | `gx10-8888/qwen3.8-27b` (fallback) |
 | `DS_MODEL_RETRIES` | `2` (attempts per model before moving to the next) |
-| `DS_IDLE_TIMEOUT` | `60` seconds without an NDJSON write (`0` disables) |
+| `DS_IDLE_TIMEOUT` | `1200` seconds without an NDJSON write (`0` disables) |
 | `DS_MAX_RUNTIME` | `3600` seconds |
 | `DS_TIMEOUT` | `3600` seconds (legacy alias for `DS_MAX_RUNTIME`) |
 | `DS_PROGRESS_INTERVAL` | `15` seconds (`0` disables progress notices) |

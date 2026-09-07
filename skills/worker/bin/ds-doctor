@@ -14,7 +14,7 @@ ds_default() {
     DS_MODEL_AUTODETECT) echo 1 ;;
     DS_MODEL_ENDPOINT) echo "" ;;
     DS_TIMEOUT)        echo 3600 ;;
-    DS_IDLE_TIMEOUT)   echo 60 ;;
+    DS_IDLE_TIMEOUT)   echo 1200 ;;
     DS_MAX_RUNTIME)    echo 3600 ;;
     DS_SERVE)          echo off ;;
     DS_AUTO)           echo 1 ;;

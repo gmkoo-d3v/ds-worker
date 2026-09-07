@@ -82,5 +82,9 @@ printf '%s\n' "$default_output" | grep -Eq '^  DS_SERVE[[:space:]]+off[[:space:]
   printf 'shared backend must be opt-in by default\n%s\n' "$default_output" >&2
   exit 1
 }
+printf '%s\n' "$default_output" | grep -Eq '^  DS_IDLE_TIMEOUT[[:space:]]+1200[[:space:]]+default$' || {
+  printf 'idle timeout default must allow slow concurrent sessions\n%s\n' "$default_output" >&2
+  exit 1
+}
 
 printf 'ds-worker config precedence: PASS\n'
