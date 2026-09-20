@@ -1,2 +1,17 @@
+# OS junk
 .DS_Store
+
+# IDE / assistant local config
 .serena/
+.claude/
+
+# local-only overrides and secrets (never commit)
+*.local
+.env
+.env.*
+!*.env.example
+config.local
+
+# ds-worker runtime state (backend normally lives under ${TMPDIR:-/tmp})
+.ds-worker/
+*.log
