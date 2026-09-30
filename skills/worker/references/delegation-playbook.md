@@ -59,6 +59,26 @@ Verify: <command>
 If this is ambiguous, make no edits and return BLOCKED.
 ```
 
+### `critic` — cross-model document judge
+
+The only persona not on the local engine: it runs the global `doc-critic` agent,
+whose model binding comes from the agent config. Use it when a long-form document
+(plan, report, task record) is about to be delivered and a second model's
+independent read is the point — the global AGENTS.md policy already mandates one
+such pass. Hand it the document with `--file` or exact paths; it reads only what
+you give it, and any repo/log verification it wants comes back as numbered
+`EVIDENCE REQUEST`s — those are `explorer`/`reviewer` work, then you bring the
+answers back for the next verdict round. Its verdict is a gate to read, not
+ground truth: you still decide.
+
+Instruction template:
+
+```
+Audit <path> before delivery. Judge factual verifiability, internal
+consistency, source-of-truth discipline, credential leaks, noise.
+Issue numbered EVIDENCE REQUESTs for anything that needs repo verification.
+```
+
 ## Parallelism
 
 Independent pieces go at once.

@@ -47,7 +47,7 @@ Attaching:
 
 ```bash
 opencode run --attach http://127.0.0.1:4096 --dir "$PWD" \
-  --agent ds-explorer --model gx10/deepseek-v4-flash-exl3-cross -- "..."
+  --agent ds-explorer --model gx10/qwen3.8-flash-next -- "..."
 ```
 
 ## `--format json` output shape (measured)
@@ -91,6 +91,15 @@ system prompt body
 
 Permission keys: `read` `edit` `glob` `grep` `list` `bash` `task` `external_directory`
 `todowrite` `webfetch` `websearch` `lsp` `skill` `question` `doom_loop`.
+
+The wrapper's four personas: `ds-explorer`, `ds-reviewer`, `ds-worker` (roles
+`explorer`/`reviewer`/`worker`, local-model-pinned via `--model`) and
+`doc-critic` (role `critic`, `mode: all` so `run --agent` accepts it, model bound
+in its own frontmatter — the wrapper deliberately sends no `--model` for it, so
+the cross-model binding survives; `DS_MODEL_CRITIC`/`--model` pin deliberately).
+The persona md files are owned by `agents/` next to `bin/`; the live registry
+under `~/.config/opencode/agent/` holds copies maintained by
+`bin/sync-agents --install` (drift check: `sync-agents`).
 
 Inspection commands: `opencode agent list`, `opencode models`, `opencode auth list`.
 
@@ -205,7 +214,7 @@ itself never took effect, and this guarantee disappears with it.
 
 ## Models (catalog vs. actually loaded)
 
-The GX10 box serves ONE model at a time on `:8000` behind the single `gx10`
+The GX10 box serves ONE model at a time on `:8000` behind the single `local-vllm`
 provider. The list below is the catalog in `opencode.jsonc`, not what is live.
 ds-worker resolves the live one itself (see `DS_MODEL_AUTODETECT`); to check by
 hand: `curl -s http://localhost:8000/v1/models`
@@ -214,18 +223,18 @@ Adding an entry here is not enough on its own: `opencode serve` snapshots the
 config at startup, so run `ds-serve restart` afterwards. Against a stale backend
 the new model fails as `UnknownError: Unexpected server error`, with nothing in
 the stream to say the model is simply unknown to it. Confirm what a backend
-actually knows with: `curl -s "$(ds-serve url)/config" | jq '.provider.gx10.models | keys'`
+actually knows with: `curl -s "$(ds-serve url)/config" | jq '.provider["local-vllm"].models | keys'`
 
 ```
-gx10/deepseek-v4-flash-exl3-cross  # local GX10 box, :8000 (vLLM) — default primary, all roles; no fallback
-gx10/qwen3.8-27b                   # same box/port — only when it is the loaded model
-gx10/gemma4-26b-a4b-fp8            # same box/port — only when it is the loaded model
+gx10/qwen3.8-flash-next      # the GX10 engine (:8000) - default primary, all roles; no fallback
+gx10/gx10-compact            # alias on the same engine - check `opencode models` before pinning
+gx10/deepseek-v4-flash       # alias on the same engine - check `opencode models` before pinning
 opencode/deepseek-v4-flash-free         # cloud free tier, unused by default
 ```
 
 Provider config (baseURL, timeouts) lives in `~/.config/opencode/opencode.jsonc`
 under the provider used by the selected model. Check the resolved provider with
-`opencode models | grep gx10` and `opencode debug config`. For a slow local
+`opencode models | grep local-vllm` and `opencode debug config`. For a slow local
 reasoning model, the relevant options are:
 
 ```jsonc

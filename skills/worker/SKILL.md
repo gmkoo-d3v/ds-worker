@@ -26,6 +26,7 @@ Never ask a worker "how should we do this?" Decide first, then hand over executi
 | Implementation candidates | `explorer` | Gathering options. Choosing is yours |
 | Test log analysis | `reviewer` | Pulling signal out of long output |
 | Tightly specified implementation | `worker` | Only what you have already designed |
+| Document audit before delivery | `critic` | The doc-critic persona — cross-model judge (agent-bound model, not the local engine) |
 
 **Never delegate**: vague tasks, implementation whose design is unsettled, changes
 that are hard to undo, anything you will say to the user, commits, pushes, PRs.
@@ -45,7 +46,39 @@ ds-worker omo oracle "Review this design for failure modes."
 ds-worker omo council "Debate whether to split the auth service."
 ds-worker omo ds-explorer "Find every call site of checkToken in src/."
 ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
+ds-worker critic --file docs/plan/foo.md "Audit this document for factual drift before delivery."
 ```
+
+`explorer` / `reviewer` / `worker` run on the local GX10 engine. `critic` is the
+fourth persona and the one exception: it dispatches the global `doc-critic`
+agent (`~/.config/opencode/agent/doc-critic.md`), whose own frontmatter binds a
+different-model provider — that cross-model binding is the point of the role, so
+the wrapper passes no `--model` and no local autodetect for it. Required final
+artifact: a `VERDICT:` line. Pass the document with `--file` or an exact path in
+the prompt; critic reads only what you hand it.
+
+## Persona files and sync
+
+The Mac copy keeps the `gx10` provider; linux-host uses `local-vllm`.
+Both bind `doc-critic` to `openai/gpt-6.1-sol`. Absence from the OpenCode
+model list does not establish that a model is uncallable: preserve the binding
+and report inference as unverified until an actual call establishes the result.
+See [portability](references/portability.md).
+
+All four persona definitions are owned by this skill's `agents/` folder — the
+supervisor's management point. OpenCode loads copies from
+`~/.config/opencode/agent/`; the link is a copy, because symlinked agent files
+are ignored at run time. After editing any persona file run
+
+```bash
+sync-agents --install     # skill/agents/*.md -> the live registry
+sync-agents               # drift check only (exit 1 on difference)
+```
+
+`sync-agents --backfill` reverses the direction (adopt a newer live file once).
+The agent frontmatter supplies the critic model by default. Optional
+`DS_MODEL_CRITIC` pins the ds-worker path; keep it equal to the frontmatter
+binding when set. `ds-doctor` checks the configured binding for drift.
 
 Main options: `--dir` working directory · `--model` override · `--session <id>` continue
 a session · `--file` attach a file · `--json` structured output · `--idle-timeout <sec>`
@@ -59,7 +92,7 @@ Defaults (models per role, stream idle timeout, max runtime, backend) live in
 An environment variable still wins for a single call:
 
 ```bash
-DS_MODEL_REVIEWER=gx10/qwen3.8-27b ds-worker reviewer --file test.log "..."
+DS_MODEL_REVIEWER=gx10/qwen3.8-flash-next ds-worker reviewer --file test.log "..."
 ```
 
 The GX10 box serves one model at a time, so ds-worker asks the endpoint which
@@ -145,8 +178,8 @@ once you (the supervisor) have the result back, never re-invoke a writing
 role yourself without first checking `git diff`/`git status` — see "When it
 fails" below.
 
-For `explorer` and `reviewer` (including the `ds-explorer` and `ds-reviewer`
-gateway aliases), if a session id exists but the required final report is
+For `explorer`, `reviewer` (including the `ds-explorer` and `ds-reviewer`
+gateway aliases) and `critic`, if a session id exists but the required final report is
 missing, the wrapper owns **one** read-only recovery continuation on the same
 session. That continuation disables tools and Qwen thinking and reports only the
 evidence the session already produced — it never searches again. `recovered`,
@@ -208,9 +241,12 @@ fact. Required:
 
 ## When it fails
 
-- `agent ... is not installed` / `mode=subagent` → run `install.sh`
+- `agent ... is not installed` / `mode=subagent` → run `sync-agents --install` (or `install.sh`)
 - **exit 3 (`ran the UNRESTRICTED default agent`)** → the sandbox was not applied.
-  Discard the result. Re-run `install.sh`, then delegate again
+  Discard the result. Re-run `sync-agents --install`, then delegate again
+- `bin/ds-worker-rr` → round-robin candidate list lives in that script's `MODELS` array
+  (current aliases: gx10/qwen3.8-flash-next, gx10/gx10-compact); it honors
+  `DS_STATE_DIR`/`XDG_STATE_HOME` for its rotation counter.
 - `no text output` → the run may have finished and been billed while the event
   stream dropped the final message. **The work is usually still in the session.**
   Recover it — this costs almost nothing, since the model answers from context:

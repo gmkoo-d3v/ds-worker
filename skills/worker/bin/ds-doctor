@@ -8,8 +8,9 @@ DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
 # Keep in sync with the defaults in ds-worker and ds-serve.
 ds_default() {
   case "$1" in
-    DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "gx10/deepseek-v4-flash-exl3-cross" ;;
+    DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "gx10/qwen3.8-flash-next" ;;
     DS_MODEL_EXPLORER_FALLBACK|DS_MODEL_REVIEWER_FALLBACK|DS_MODEL_WORKER_FALLBACK) echo "" ;;
+    DS_MODEL_CRITIC) echo "" ;;   # empty = the doc-critic agent's own bound model
     DS_MODEL_RETRIES)  echo 2 ;;
     DS_MODEL_AUTODETECT) echo 1 ;;
     DS_MODEL_ENDPOINT) echo "" ;;
@@ -61,6 +62,7 @@ if [ "${1:-}" = "--config" ]; then
   max_runtime_from_file="$(ds_from_file DS_MAX_RUNTIME)"
   for k in DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER \
            DS_MODEL_EXPLORER_FALLBACK DS_MODEL_REVIEWER_FALLBACK DS_MODEL_WORKER_FALLBACK DS_MODEL_RETRIES \
+           DS_MODEL_CRITIC \
            DS_MODEL_AUTODETECT DS_MODEL_ENDPOINT \
            DS_TIMEOUT DS_IDLE_TIMEOUT DS_MAX_RUNTIME DS_SERVE DS_AUTO \
            DS_OPENCODE_HOST DS_OPENCODE_PORT DS_PORT_SCAN DS_STATE_DIR \
@@ -139,20 +141,53 @@ if command -v opencode >/dev/null; then
 
   agents="$(opencode agent list 2>/dev/null)"
   agent_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
-  for a in ds-explorer ds-reviewer ds-worker; do
+  for a in ds-explorer ds-reviewer ds-worker doc-critic; do
     line="$(printf '%s\n' "$agents" | grep "^${a} " || true)"
     if [ -z "$line" ]; then
-      fail "agent $a not installed — run install.sh"
+      fail "agent $a not installed — run sync-agents --install (or install.sh)"
     elif printf '%s' "$line" | grep -q '(subagent)'; then
       fail "agent $a is mode=subagent — 'run --agent' would fall back to the default agent"
     elif [ -L "$agent_dir/$a.md" ]; then
-      fail "agent $a is a symlink — OpenCode lists it but ignores it at run time; re-run install.sh"
+      fail "agent $a is a symlink — OpenCode lists it but ignores it at run time; re-run sync-agents --install (or install.sh)"
     elif [ ! -f "$agent_dir/$a.md" ]; then
       fail "agent $a file missing at $agent_dir/$a.md"
     else
       pass "agent $a"
     fi
   done
+
+  # critic model split guard: DS_MODEL_CRITIC (config) must equal the model
+  # bound in the doc-critic agent's frontmatter, or the two invocation paths
+  # silently run different models (observed 2026-09-29 18:26 event).
+  critic_file="$agent_dir/doc-critic.md"
+  critic_bound="$(sed -n 's/^model:[[:space:]]*//p' "$critic_file" 2>/dev/null | head -1 | tr -d '\"')"
+  critic_cfg="${DS_MODEL_CRITIC:-$(ds_from_file DS_MODEL_CRITIC 2>/dev/null || true)}"
+  [ -n "$critic_cfg" ] || critic_cfg="$(ds_default DS_MODEL_CRITIC)"
+  if [ -z "$critic_cfg" ]; then
+    info "critic runs the doc-critic agent's own bound model: ${critic_bound:-unknown}"
+  elif [ -n "$critic_bound" ] && [ "$critic_cfg" = "$critic_bound" ]; then
+    pass "critic model $critic_cfg (config == agent frontmatter)"
+  else
+    fail "critic model split: config pins $critic_cfg but doc-critic.md binds ${critic_bound:-nothing} — sync the two"
+  fi
+
+  critic_effective="${critic_cfg:-$critic_bound}"
+  if [ -n "$critic_effective" ] && printf '%s\n' "$models" | grep -qxF "$critic_effective"; then
+    info "critic model listed: $critic_effective (inference not verified)"
+  elif [ -n "$critic_effective" ]; then
+    info "critic model not listed: $critic_effective (callability unverified; binding preserved)"
+  else
+    fail "critic model unbound"
+  fi
+
+  cmd_file="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/command/doc-review.md"
+  if [ -f "$cmd_file" ] && grep -q 'doc-critic' "$cmd_file"; then
+    pass "doc-review command present and names doc-critic"
+  elif [ -f "$cmd_file" ]; then
+    fail "$cmd_file exists but does not invoke doc-critic"
+  else
+    fail "doc-review command missing — install.sh (or copy skill/worker/command/doc-review.md)"
+  fi
 fi
 
 SERVE="$(dirname "$(command -v ds-serve || echo "$(dirname "$0")/ds-serve")")/ds-serve"

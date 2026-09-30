@@ -1,6 +1,6 @@
 # Verification protocol
 
-GX10 Qwen output is a **claim**. It becomes fact only once you confirm it.
+Local-model output is a **claim**. It becomes fact only once you confirm it.
 
 ## Promotion rules
 
@@ -78,3 +78,11 @@ Say, in words, which is which.
 
 "The worker says it passed" does not mean it passed. Do not write it that way.
 If you did not verify, say you did not verify.
+
+## Promotion contract (critic)
+
+The critic's `VERDICT: PASS` permits delivery; `VERDICT: FIX_NEEDED` returns to
+the writing lane. `EVIDENCE REQUEST` items become explorer/reviewer tasks and
+the supervisor verifies the evidence before requesting another verdict.
+The **supervisor** decides promotion to a higher-model review — critics never
+self-escalate, and promotion spends the external-model budget.

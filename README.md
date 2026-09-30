@@ -32,8 +32,9 @@ running on OpenCode headless.
 ./install.sh
 ```
 
-- Three OpenCode agents → `~/.config/opencode/agent/`
-- `ds-worker` / `ds-serve` / `ds-doctor` → `~/.local/bin/`
+- Four OpenCode personas, including `doc-critic` → `~/.config/opencode/agent/`
+- `ds-worker` / `ds-serve` / `ds-doctor` / `ds-worker-rr` / `sync-agents` → `~/.local/bin/`
+- `/doc-review` command → `~/.config/opencode/command/`
 - Skill → `~/.claude/skills/worker` · `~/.codex/skills/worker`
 
 Requires `opencode`, `jq`, `curl`, and a completed `opencode auth login`.
@@ -52,6 +53,9 @@ ds-worker omo oracle "Review this design for failure modes."
 ds-worker omo council "Debate whether to split the auth service."
 ds-worker omo ds-explorer "Find every call site of checkToken in src/."
 ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
+ds-worker critic --file docs/plan/foo.md "Audit the supplied document before delivery."
+sync-agents                 # check persona registry drift
+sync-agents --install       # install managed persona updates
 ```
 
 ```bash
@@ -79,8 +83,9 @@ and ignored, and nothing in it is executed.
 
 | Setting | Default |
 |---|---|
-| `DS_MODEL_EXPLORER` / `DS_MODEL_REVIEWER` / `DS_MODEL_WORKER` | `gx10-8000/deepseek-v4-flash-exl3-cross` (primary) |
-| `DS_MODEL_EXPLORER_FALLBACK` / `DS_MODEL_REVIEWER_FALLBACK` / `DS_MODEL_WORKER_FALLBACK` | `gx10-8888/qwen3.8-27b` (fallback) |
+| `DS_MODEL_EXPLORER` / `DS_MODEL_REVIEWER` / `DS_MODEL_WORKER` | `gx10/qwen3.8-flash-next` |
+| `DS_MODEL_EXPLORER_FALLBACK` / `DS_MODEL_REVIEWER_FALLBACK` / `DS_MODEL_WORKER_FALLBACK` | empty |
+| `DS_MODEL_CRITIC` | empty (agent frontmatter selects the model) |
 | `DS_MODEL_RETRIES` | `2` (attempts per model before moving to the next) |
 | `DS_IDLE_TIMEOUT` | `1200` seconds without an NDJSON write (`0` disables) |
 | `DS_MAX_RUNTIME` | `3600` seconds |
@@ -96,8 +101,8 @@ and ignored, and nothing in it is executed.
 
 ### Choosing a model per role
 
-Each role has a primary and a fallback model, both local GX10 boxes by
-default: DeepSeek (`:8000`) first, then Qwen (`:8888`) if DeepSeek fails.
+The three local roles use the Mac's `gx10` catalog on the serving endpoint.
+Fallbacks are opt-in; the wrapper detects the loaded model within that catalog.
 `ds-worker` tries the primary up to `DS_MODEL_RETRIES` times, then the
 fallback up to `DS_MODEL_RETRIES` times, stopping at the first success. You
 can override either model per role independently in the config file, or skip

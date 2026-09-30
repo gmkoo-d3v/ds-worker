@@ -40,6 +40,7 @@ set -euo pipefail
 case "${1:-}" in
   agent)
     [ "${2:-}" = "list" ] || exit 0
+    printf 'council (subagent)\n'
     printf 'designer (subagent)\n'
     printf 'ds-explorer (all)\n'
     printf 'ds-reviewer (all)\n'

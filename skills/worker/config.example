@@ -5,14 +5,14 @@
 # an environment variable of the same name always wins, so you can still
 # override per call:
 #
-#   DS_MODEL_REVIEWER=gx10/qwen3.8-27b ds-worker reviewer "..."
+#   DS_MODEL_REVIEWER=gx10/qwen3.8-flash-next ds-worker reviewer "..."
 #
 # This file is PARSED, not sourced. Only the keys listed below are read, values
 # are taken literally, and nothing here is executed. No $(...), no variables.
 # Check what is actually in effect with:  ds-doctor --config
 
 # --- models -----------------------------------------------------------------
-# See what this machine has:  opencode models | grep gx10
+# See what this machine has:  opencode models | grep local-vllm
 #
 # Each role has a PRIMARY model and a FALLBACK model. ds-worker tries the
 # primary up to DS_MODEL_RETRIES times, and only after all of those fail does
@@ -20,17 +20,17 @@
 # the first success. --model on a single call bypasses this chain entirely
 # and runs exactly that model once. For the writing `worker` role, the chain
 # only continues to the next attempt while --dir is a git working tree
-# confirmed unchanged since the chain started (see README.md, "Safety model").
+# confirmed unchanged since the chain started (see references/verification.md, "Safety model").
 #
-# Built-in default (no config needed): local GX10 DeepSeek on the sole `gx10`
+# Built-in default (no config needed): local GX10 DeepSeek on the single `local-vllm`
 # provider (:8000), 2 tries, no fallback — no external API, no per-call
 # billing, no rate limit. The box serves one model at a time, so there is no
 # second endpoint to fall back to; when the primary is spent the call fails
 # outright instead of silently retrying a dead port.
 
-#DS_MODEL_EXPLORER=gx10/deepseek-v4-flash-exl3-cross
-#DS_MODEL_REVIEWER=gx10/deepseek-v4-flash-exl3-cross
-#DS_MODEL_WORKER=gx10/deepseek-v4-flash-exl3-cross
+#DS_MODEL_EXPLORER=gx10/qwen3.8-flash-next
+#DS_MODEL_REVIEWER=gx10/qwen3.8-flash-next
+#DS_MODEL_WORKER=gx10/qwen3.8-flash-next
 
 # Empty by default. Set these only while a second model is genuinely being
 # served — a fallback pointing at a model that is not loaded just burns
@@ -38,8 +38,12 @@
 #DS_MODEL_EXPLORER_FALLBACK=
 #DS_MODEL_REVIEWER_FALLBACK=
 #DS_MODEL_WORKER_FALLBACK=
-
 #DS_MODEL_RETRIES=2
+
+# The critic role runs the doc-critic agent, whose model is bound in the agent's
+# own config (cross-model by design — NOT a local GX10 model). Empty = leave it
+# to the agent config; set it only to pin a different model deliberately.
+#DS_MODEL_CRITIC=
 
 # --- serving-model autodetect ------------------------------------------------
 # The box serves ONE model at a time, so the pins above go stale as soon as you
@@ -58,9 +62,9 @@
 
 # Pin a specific catalog model instead (disables nothing, but autodetect will
 # still redirect it if a different model is loaded — use --model to truly pin):
-#DS_MODEL_EXPLORER=gx10/qwen3.8-27b
-#DS_MODEL_REVIEWER=gx10/qwen3.8-27b
-#DS_MODEL_WORKER=gx10/qwen3.8-27b
+#DS_MODEL_EXPLORER=gx10/qwen3.8-flash-next
+#DS_MODEL_REVIEWER=gx10/qwen3.8-flash-next
+#DS_MODEL_WORKER=gx10/qwen3.8-flash-next
 
 # Cloud DeepSeek alternative, if the GX10 box is down or you want a different
 # model per role. Measured cost: pro is roughly 3-4x flash. explorer does wide

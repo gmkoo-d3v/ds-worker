@@ -29,7 +29,7 @@ for a in "$@"; do
   fi
 done
 
-STATE_DIR="${DS_STATE_DIR:-$HOME/.local/state/ds-worker}"
+STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
 STATE_DIR="${STATE_DIR/#\~/$HOME}"
 mkdir -p "$STATE_DIR"
 COUNTER_FILE="$STATE_DIR/rr_${role}.count"

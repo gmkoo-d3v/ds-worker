@@ -39,6 +39,11 @@ case "${1:-}" in
     printf 'ds-explorer (all)\n'
     printf 'ds-reviewer (all)\n'
     printf 'ds-worker (all)\n'
+    printf 'oracle (subagent)\n'
+    printf 'council (subagent)\n'
+    printf 'librarian (subagent)\n'
+    printf 'designer (subagent)\n'
+    printf 'fixer (subagent)\n'
     printf 'orchestrator (primary)\n'
     exit 0
     ;;

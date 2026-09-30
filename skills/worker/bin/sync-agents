@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# sync-agents — keep the persona agent definitions under one roof.
+#
+#   source of truth : <skill>/agents/*.md   (this folder, supervisor-managed)
+#   live registry   : ~/.config/opencode/agent/*.md  (what opencode run loads)
+#
+# OpenCode loads agent files from its config dir at session start; symlinked
+# agent files are ignored at run time (measured — see
+# references/opencode-cli.md), so the link between the two homes is a COPY and
+# must be checked, not assumed.
+#
+#   sync-agents            check drift; exit 1 on any difference
+#   sync-agents --install  copy skill/agents/*.md over the live registry,
+#                          consulting the ownership ledger (lib/ownership.sh):
+#                          identical/absent -> install, a file matching its
+#                          ledger hash -> overwrite + re-record, anything
+#                          else -> CONFLICT: list every conflicting file and
+#                          exit nonzero WITHOUT touching any of them
+#   sync-agents --replace-with-backup
+#                          install mode where conflicts first get a
+#                          timestamped .bak copy, then the repo version
+#   sync-agents --backfill adopt the live files as the source (live is newer;
+#                          one-time bootstrap, then the skill folder owns again)
+set -euo pipefail
+
+SOURCE_PATH="${BASH_SOURCE[0]}"
+SOURCE_HOPS=0
+while [ -L "$SOURCE_PATH" ]; do
+  SOURCE_HOPS=$((SOURCE_HOPS + 1))
+  [ "$SOURCE_HOPS" -le 40 ] || { printf 'sync-agents: symlink chain too deep\n' >&2; exit 2; }
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+  SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+  case "$SOURCE_PATH" in /*) ;; *) SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH" ;; esac
+done
+SELF_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+SRC_DIR="$SELF_DIR/../agents"
+LIVE_DIR="${OPENCODE_AGENT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent}"
+# shellcheck source=../lib/ownership.sh
+. "$SELF_DIR/../lib/ownership.sh"
+LEDGER="$(own_ledger_path)"
+
+MODE="check"
+REPLACE=0
+for arg in "$@"; do
+  case "$arg" in
+    "")                            MODE="check" ;;
+    --install)                     MODE="install" ;;
+    --replace-with-backup)         MODE="install"; REPLACE=1 ;;
+    --backfill)                    MODE="backfill" ;;
+    -h|--help)
+      sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 2 ;;
+    *) printf 'sync-agents: unknown option %s\n' "$arg" >&2; exit 2 ;;
+  esac
+done
+
+[ -d "$SRC_DIR" ] || { printf 'sync-agents: source dir missing: %s\n' "$SRC_DIR" >&2; exit 2; }
+mkdir -p "$LIVE_DIR"
+
+drift=0
+changed=()
+case "$MODE" in
+  backfill)
+    n=0
+    for live in "$LIVE_DIR"/ds-explorer.md "$LIVE_DIR"/ds-reviewer.md "$LIVE_DIR"/ds-worker.md "$LIVE_DIR"/doc-critic.md; do
+      [ -f "$live" ] || continue
+      cmp -s "$live" "$SRC_DIR/$(basename "$live")" && continue
+      cp "$live" "$SRC_DIR/$(basename "$live")"
+      printf 'backfilled %s -> skill/agents/\n' "$(basename "$live")"
+      n=$((n+1))
+    done
+    printf 'sync-agents: backfill done (%s file(s) adopted from the live registry)\n' "$n"
+    ;;
+  install)
+    # Phase 1: classify everything before touching anything.
+    todo_act=(); todo_src=(); todo_dst=(); todo_name=()
+    conflict_count=0
+    for src in "$SRC_DIR"/*.md; do  [ -e "$src" ] || continue
+      name="$(basename "$src")"
+      live="$LIVE_DIR/$name"
+      if [ -L "$live" ] && [ ! -e "$live" ]; then
+        printf 'CONFLICT %s: %s is a dangling symlink — nothing it points to exists; not recorded as installed\n' "$name" "$live"
+        todo_act+=("conflict"); conflict_count=$((conflict_count+1))
+      elif [ -L "$live" ]; then
+        # Keep the real-file-replaces-symlink rule: opencode ignores links.
+        todo_act+=("replace-link")
+      else
+        case "$(own_classify "$src" "$live" "$LEDGER")" in
+          identical) todo_act+=("skip") ;;
+          absent)    todo_act+=("install") ;;
+          managed-updatable) todo_act+=("update") ;;
+          conflict)
+            printf 'CONFLICT %s: %s differs from the source and is not recorded as installed by this tool — refusing to overwrite\n' "$name" "$live"
+            todo_act+=("conflict"); conflict_count=$((conflict_count+1)) ;;
+        esac
+      fi
+      todo_src+=("$src"); todo_dst+=("$live"); todo_name+=("$name")
+    done
+
+    # Conflicts decide the run before a single write happens.
+    if [ "$conflict_count" -gt 0 ] && [ "$REPLACE" -eq 0 ]; then
+      printf 'sync-agents: %s conflict(s) — nothing installed; re-run with --replace-with-backup to back up and adopt the source version\n' "$conflict_count" >&2
+      exit 1
+    fi
+
+    # Phase 2: apply. Ledger lines land only after a successful write.
+    for i in "${!todo_act[@]}"; do
+      act="${todo_act[$i]}"; src="${todo_src[$i]}"; dst="${todo_dst[$i]}"; name="${todo_name[$i]}"
+      case "$act" in
+        skip) continue ;;
+        conflict)
+          if [ -e "$dst" ]; then
+            backup="$(own_backup "$dst")"
+            printf 'BACKUP %s: %s\n' "$name" "$backup"
+          else
+            printf 'REPLACE %s: removed dangling symlink %s\n' "$name" "$dst"
+          fi
+          rm -f "$dst"
+          cp "$src" "$dst" || continue ;;
+        replace-link)
+          printf 'DRIFT %s: live entry is a symlink — ignored by opencode at run time; replacing with a real file\n' "$name"
+          rm -f "$dst"
+          cp "$src" "$dst" || continue ;;
+        install|update)
+          cp "$src" "$dst" || continue ;;
+      esac
+      own_record "$src" "$dst" "$LEDGER"
+      changed+=("$name")
+    done
+    printf 'sync-agents: installed %s file(s); changed: %s\n' \
+      "${#changed[@]}" "${changed[*]:-none}"
+    # Verify what OpenCode will actually load, not just the bytes on disk.
+    for name in ds-explorer ds-reviewer ds-worker doc-critic; do
+      line="$(opencode agent list 2>/dev/null | grep "^${name} " || true)"
+      [ -n "$line" ] || printf 'WARN %s: not visible to opencode after install\n' "$name"
+    done
+    ;;
+  check)
+    for src in "$SRC_DIR"/*.md; do  [ -e "$src" ] || continue
+      name="$(basename "$src")"
+      live="$LIVE_DIR/$name"
+      if [ -L "$live" ]; then
+        printf 'DRIFT %s: live entry is a symlink — ignored by opencode at run time; replacing with a real file\n' "$name"
+        drift=1
+      elif [ ! -f "$live" ]; then
+        printf 'DRIFT %s: not installed\n' "$name"
+        drift=1
+      elif ! cmp -s "$src" "$live"; then
+        printf 'DRIFT %s: content differs\n' "$name"
+        diff -u "$live" "$src" | head -20 || true
+        drift=1
+      fi
+    done
+    if [ "$drift" -eq 0 ]; then
+      printf 'sync-agents: in sync (%s)\n' "$SRC_DIR"
+    else
+      printf 'sync-agents: DRIFT — run sync-agents --install (skill owns) or --backfill (live owns)\n' >&2
+      exit 1
+    fi
+    ;;
+esac
