@@ -27,6 +27,7 @@ Never ask a worker "how should we do this?" Decide first, then hand over executi
 | Test log analysis | `reviewer` | Pulling signal out of long output |
 | Tightly specified implementation | `worker` | Only what you have already designed |
 | Document audit before delivery | `critic` | The doc-critic persona — cross-model judge (agent-bound model, not the local engine) |
+| Judgment over material you hand it | `direct` | One chat completion straight to GX10 — no OpenCode, no tools |
 
 **Never delegate**: vague tasks, implementation whose design is unsettled, changes
 that are hard to undo, anything you will say to the user, commits, pushes, PRs.
@@ -36,6 +37,7 @@ that are hard to undo, anything you will say to the user, commits, pushes, PRs.
 ```bash
 ds-worker <role> [--dir <path>] "<instruction>"
 ds-worker omo <agent> [--dir <path>] "<instruction>"
+ds-worker direct [--file <path>]... "<instruction>"
 ```
 
 ```bash
@@ -47,6 +49,7 @@ ds-worker omo council "Debate whether to split the auth service."
 ds-worker omo ds-explorer "Find every call site of checkToken in src/."
 ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
 ds-worker critic --file docs/plan/foo.md "Audit this document for factual drift before delivery."
+ds-worker direct --file test.log "Rank the root-cause candidates for this failure."
 ```
 
 `explorer` / `reviewer` / `worker` run on the local GX10 engine. `critic` is the
@@ -56,6 +59,18 @@ different-model provider — that cross-model binding is the point of the role, 
 the wrapper passes no `--model` and no local autodetect for it. Required final
 artifact: a `VERDICT:` line. Pass the document with `--file` or an exact path in
 the prompt; critic reads only what you hand it.
+
+`direct` skips OpenCode entirely: it sends one OpenAI-style chat completion to
+the GX10 endpoint (`DS_MODEL_ENDPOINT`, else the provider's `baseURL` in
+`opencode.jsonc`) with the `--file` contents inlined, and follows the loaded
+model like the other roles. The model has **no tools** — it cannot open a path
+you only name, search, or edit — and there are no agent permissions or
+sessions; `--dir`, `--session` and similar options are refused. Use it for
+logs, diffs and documents you can hand over whole, and as the path that keeps
+working when the OpenCode CLI changes. It has no report contract: any
+non-empty answer is `CLEAN_RESULT`; an empty one exits 4, an HTTP or
+connection error 1, `--max-runtime` 124. The request and raw reply are kept
+under `$DS_STATE_DIR/runs/`.
 
 ## Persona files and sync
 
@@ -101,10 +116,11 @@ model is actually loaded and uses that — load Qwen instead of DeepSeek on
 present in the provider's catalog in `opencode.jsonc`; otherwise it keeps the
 configured pin and says why. Set `DS_MODEL_AUTODETECT=0` to disable.
 
-The default worker path is one-shot and does not use a shared OpenCode control
-port. If `DS_SERVE=auto` is explicitly enabled, restart the shared backend
-(`ds-serve restart`) after changing `opencode.jsonc`; a long-lived backend
-snapshots the config and can otherwise keep an old model catalog.
+Every OpenCode role runs `opencode run --standalone` — a private server per
+call, started inside `--dir` (OpenCode v2 has no `run --dir`). v2's default
+shared background service could not reach the GX10 box when measured.
+`DS_SERVE=auto` is ignored with a notice until `ds-serve` is ported to the v2
+server; see [references/opencode-cli.md](references/opencode-cli.md).
 
 Each role tries its resolved model up to `DS_MODEL_RETRIES` times (default 2),
 then its fallback model up to `DS_MODEL_RETRIES` more times if one is set —
@@ -122,7 +138,7 @@ does not blindly retry a full Council. The five built-ins (`oracle`, `council`,
 `librarian`, `designer`, `fixer`) are OpenCode subagents, so each runs through
 the primary `orchestrator` with `task(subagent_type='<agent>')`: `council`
 collects every configured seat and synthesizes, the others request their named
-subagent once. A `(subagent)` mode in `opencode agent list` is expected for
+subagent once. A `(subagent)` mode in `opencode debug agents` is expected for
 these built-ins and is only a problem if you pass such an agent directly to
 `opencode run --agent`; do not reinstall to "fix" it. The `ds-explorer`
 and `ds-reviewer` gateway aliases retain the local DS model and final-report
@@ -138,8 +154,7 @@ OpenCode's provider options have two separate protections:
 - `timeout` is the provider request's absolute wall-clock limit.
 
 For a local provider (DeepSeek or Qwen), configure those options in OpenCode's
-provider configuration. If `DS_SERVE=auto` is explicitly enabled, restart the
-owned backend with `ds-serve restart`.
+provider configuration.
 The worker wrapper adds a second boundary:
 
 - `--idle-timeout` resets on every OpenCode NDJSON output write, including
@@ -242,6 +257,14 @@ fact. Required:
 ## When it fails
 
 - `agent ... is not installed` / `mode=subagent` → run `sync-agents --install` (or `install.sh`)
+- `could not read the agent list` → `opencode debug agents` gave no JSON array
+  three times. Check `opencode --version` and run
+  `bash tests/test_opencode_v2_contract.sh` from the skill's repository: a
+  failing line names the CLI change. Meanwhile `ds-worker direct` still works
+  for material you can hand over.
+- `provider.transport` / `EHOSTUNREACH` in the result's `errors` → the OpenCode
+  process cannot reach the GX10 box. Compare with
+  `ds-doctor` (it curls the endpoint) from the same shell.
 - **exit 3 (`ran the UNRESTRICTED default agent`)** → the sandbox was not applied.
   Discard the result. Re-run `sync-agents --install`, then delegate again
 - `bin/ds-worker-rr` → round-robin candidate list lives in that script's `MODELS` array

@@ -92,6 +92,7 @@
 # DS_MAX_RUNTIME   absolute wall-clock limit for one call (exit 124)
 # DS_TIMEOUT       legacy alias for DS_MAX_RUNTIME
 # DS_SERVE    off = fresh process per call (default), auto = opt-in shared backend
+#             (auto is ignored with a notice until ds-serve supports OpenCode v2)
 # DS_AUTO     1 = pass --auto. Required for headless runs; it cannot override a
 #             `deny` in an agent definition, which is what keeps the read-only
 #             roles read-only. Set to 0 only when debugging permission prompts.

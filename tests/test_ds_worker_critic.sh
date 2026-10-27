@@ -7,8 +7,8 @@ mkdir -p "$task_tmp/bin"
 cat > "$task_tmp/bin/opencode" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "$1" = agent ]; then
-  printf 'doc-critic (all)\n'
+if [ "$1" = debug ]; then
+  printf '[{"name":"doc-critic","mode":"all","hidden":false}]\n'
   exit 0
 fi
 printf '%s\n' "$@" >> "$TEST_ARGV"

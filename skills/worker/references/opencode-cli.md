@@ -1,54 +1,77 @@
 # OpenCode CLI — verified facts
 
-Against `opencode 1.18.18`. Everything below was **run locally and observed**,
-not taken from documentation alone.
+Against `opencode v2.1.4` (2026-10-27). Everything below was **run locally and
+observed**, not taken from documentation alone. Sections that still describe
+`1.18.18` behavior say so.
 Official docs: <https://opencode.ai/docs/cli/>, <https://opencode.ai/docs/agents/>
+
+Every v2 call that differs from v1 goes through `lib/opencode-cli.sh`, and
+`tests/test_opencode_v2_contract.sh` checks the shape against the installed
+binary (`DS_CONTRACT_LIVE=1` adds GX10 round trips).
 
 ## Headless execution
 
 ```bash
-opencode run "investigate this"
+opencode run --standalone "investigate this"
 ```
 
-Actual flags, from `opencode run --help`:
+Actual flags, from `opencode run --help` (v2.1.4):
 
 | Flag | Meaning |
 |---|---|
-| `-m, --model <provider/model>` | Model |
+| `-m, --model <provider/model#variant>` | Model; the reasoning variant is a `#` suffix |
 | `--agent <name>` | Agent |
-| `--dir <path>` | Working directory (path on the remote server when attaching) |
 | `--format default\|json` | `json` emits a **raw JSON event stream** |
-| `--attach <url>` | Attach to an already running server |
+| `--standalone` | Run with a private server instead of the background service |
+| `--server <url>` | Connect to a server URL instead of the background service |
 | `-s, --session <id>` / `-c, --continue` / `--fork` | Session continuation |
-| `-f, --file <path>` | Attach files (array) |
-| `--variant <name>` | Provider reasoning effort (`high`, `max`, `minimal`) |
+| `-f, --file <path>` | Attach a file (repeatable) |
 | `--auto` | Auto-approve permissions that are not explicitly denied |
-| `--pure` | Run without external plugins |
-| `-p/--password`, `-u/--username` | Server basic auth |
-| `--title`, `--share`, `--thinking`, `--print-logs`, `--log-level` | Misc |
+| `--title`, `--thinking` | Misc |
 
-## Long-lived backend
+### What v2 removed, and what ds-worker does instead
 
-Spawning a fresh process per call pays MCP/plugin cold boot every time. The
-official docs recommend a resident server for exactly this reason.
+| v1 | v2 | ds-worker |
+|---|---|---|
+| `opencode agent list` | prints help, **exits 0** — a grep on it finds nothing | `oc_agent_list` reads `opencode debug agents` (JSON array of `name`, `mode`, `hidden`, `permissions`) and prints `name (mode)` rows |
+| `run --dir <path>` | unknown flag, prints help | the child is started inside `--dir` (`oc_in_dir`); v2 uses the process cwd |
+| `run --attach <url>` | `--server <url>` | `ds-serve` is not ported yet, so every run is `--standalone` |
+| `run --variant <name>` | `--model provider/model#variant` | `oc_model_ref` appends `#variant` |
+
+Measured v2 behavior the wrapper relies on:
+
+- **Default is a shared background service.** Run through it, the GX10 endpoint
+  was unreachable (`provider.transport` · `EHOSTUNREACH`) while `curl` from the
+  same shell reached it, and `--standalone` from the same shell worked. ds-worker
+  always passes `--standalone`, which is also what `DS_SERVE=off` always meant.
+- `opencode debug agents` has returned `[]` once and a truncated document once on
+  back-to-back calls; `oc_agent_list` accepts only a non-empty array and retries
+  up to 3 times.
+- `--` before the prompt is still accepted, and `--session <id> --continue`
+  resumes that exact session.
+- `OPENCODE_CONFIG_CONTENT` still applies to a `--standalone` run (a tools-off
+  override made the agent answer without tools). `opencode debug agents` and
+  `opencode debug config` do not show it.
+- Errors arrive as a `{"type":"error","error":{"type":...,"message":...}}` event
+  with exit 1; ds-worker copies the messages into the result's `errors` array.
+
+## Long-lived backend (1.18.18; not ported to v2)
+
+v2 `opencode serve --hostname --port` still exists, but it now prints a
+generated server password and `GET /config` answers `200` with the **web UI
+HTML**, so `ds-serve`'s ownership probe below would accept any server. Until
+`ds-serve` is ported, `ds-worker` ignores `DS_SERVE` with a notice.
+
+What held on 1.18.18:
 
 ```bash
 opencode serve --hostname 127.0.0.1 --port 4096
 ```
 
-`serve` flags: `--port`, `--hostname`, `--mdns`, `--mdns-domain`, `--cors`.
-
 - **Health check**: `GET http://127.0.0.1:4096/config` → `200`, `application/json`
   (`/app` also returns 200 but serves the web UI HTML)
 - Without `OPENCODE_SERVER_PASSWORD` the server warns that it is unsecured.
   `ds-serve` therefore refuses any bind other than loopback unless it is set.
-
-Attaching:
-
-```bash
-opencode run --attach http://127.0.0.1:4096 --dir "$PWD" \
-  --agent ds-explorer --model gx10/qwen3.8-flash-next -- "..."
-```
 
 ## `--format json` output shape (measured)
 
@@ -101,7 +124,7 @@ The persona md files are owned by `agents/` next to `bin/`; the live registry
 under `~/.config/opencode/agent/` holds copies maintained by
 `bin/sync-agents --install` (drift check: `sync-agents`).
 
-Inspection commands: `opencode agent list`, `opencode models`, `opencode auth list`.
+Inspection commands: `opencode debug agents` (JSON), `opencode models`, `opencode auth list`.
 
 ## OMO Slim gateway
 
@@ -118,7 +141,7 @@ calls make one wrapper attempt so OMO Slim owns its configured seat/model
 fallback; the wrapper must not blindly retry a full Council and duplicate
 external calls. `council` asks the orchestrator to collect every configured
 seat and synthesize; the other built-ins request their named subagent once.
-Seeing `(subagent)` next to an OMO built-in in `opencode agent list` is the
+Seeing `(subagent)` next to an OMO built-in in the agent list is the
 expected mode — it is only invalid when such an agent is passed directly to
 `opencode run --agent`; do not reinstall to change it. `fixer` may write files,
 is refused for `--dir $HOME` or `/`, and does not carry the legacy worker
@@ -134,7 +157,7 @@ All six fail **silently**. No error; just a wrong result.
 ! agent "ds-explorer" is a subagent, not a primary agent. Falling back to default agent
 ```
 
-One warning line on stderr, then it runs **the unrestricted default agent**. The
+(1.18.18) One warning line on stderr, then it runs **the unrestricted default agent**. The
 prompt and the permissions both vanish. Combined with `--auto`, that is an
 unrestricted agent running unattended.
 → Every agent in this skill is `mode: all`. OMO's built-ins are the exception:
@@ -144,15 +167,16 @@ they legitimately ship as `mode: subagent`, which is fine because
 
 ### 2. Symlinked agent files are ignored at run time
 
-They show up perfectly well in `opencode agent list`. But neither the prompt nor
+They show up perfectly well in the agent list. But neither the prompt nor
 the permissions apply to an actual run. The file must be a real copy.
 → `install.sh` uses `cp`. Do not change it to `ln -s`.
 
 ### 3. An unknown agent name is not an error
 
-`--agent no-such-agent-xyz` simply runs the default agent. A typo silently removes
-the sandbox.
-→ `ds-worker` checks `agent list` before the call, and after the call greps stderr
+(1.18.18) `--agent no-such-agent-xyz` simply runs the default agent. A typo
+silently removes the sandbox. v2.1.4 fails instead (`Agent not found`, exit 1);
+the contract test's live part pins that.
+→ `ds-worker` checks the agent list before the call, and after the call greps stderr
 for `Falling back to default agent`, **failing hard with exit 3**.
 
 ### 4. A running backend caches the agent registry it booted with
@@ -162,7 +186,7 @@ cached definition was `mode: subagent`, trap 1 fires.
 → `ds-serve` records a fingerprint of the agent files in its state and restarts
 automatically when it changes.
 
-### 5. `--file` is an array option and swallows the prompt after it
+### 5. `--file` is an array option and swallows the prompt after it (1.18.18)
 
 ```
 Error: File not found: [supervisor task | role=reviewer | cwd=...]   ← the prompt, read as a filename
@@ -187,7 +211,7 @@ reach them.
 
 `permission` accepts arbitrary tool-name keys, wildcards included, and a specific
 key beats the wildcard — both confirmed in the resolved output of
-`opencode agent list`. So each agent default-denies the namespace and allows back
+`opencode agent list` (v2: the `permissions` array in `opencode debug agents`). So each agent default-denies the namespace and allows back
 a named read-only set:
 
 ```yaml

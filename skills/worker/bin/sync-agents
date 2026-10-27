@@ -37,6 +37,7 @@ SRC_DIR="$SELF_DIR/../agents"
 LIVE_DIR="${OPENCODE_AGENT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent}"
 # shellcheck source=../lib/ownership.sh
 . "$SELF_DIR/../lib/ownership.sh"
+. "$SELF_DIR/../lib/opencode-cli.sh"
 LEDGER="$(own_ledger_path)"
 
 MODE="check"
@@ -130,8 +131,9 @@ case "$MODE" in
     printf 'sync-agents: installed %s file(s); changed: %s\n' \
       "${#changed[@]}" "${changed[*]:-none}"
     # Verify what OpenCode will actually load, not just the bytes on disk.
+    agents="$(oc_agent_list || true)"
     for name in ds-explorer ds-reviewer ds-worker doc-critic; do
-      line="$(opencode agent list 2>/dev/null | grep "^${name} " || true)"
+      line="$(printf '%s\n' "$agents" | grep "^${name} " || true)"
       [ -n "$line" ] || printf 'WARN %s: not visible to opencode after install\n' "$name"
     done
     ;;

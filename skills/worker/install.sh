@@ -21,6 +21,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   printf 'install.sh: lib/ownership.sh missing — incomplete checkout\n' >&2; exit 2; }
 # shellcheck source=lib/ownership.sh
 . "$SELF_DIR/lib/ownership.sh"
+. "$SELF_DIR/lib/opencode-cli.sh"
 
 SRC_BIN="$SELF_DIR/bin"
 SRC_AGENTS="$SELF_DIR/agents"
@@ -129,7 +130,7 @@ if [ "$MODE" = "verify" ]; then
     printf 'VERIFY %s/%s: %s\n' "${c_kind[$i]}" "${c_name[$i]}" "$word"
   done
   if [ "$HAVE_OPENCODE" -eq 1 ]; then
-    lines="$(opencode agent list 2>/dev/null || true)"
+    lines="$(oc_agent_list || true)"
     for a in ds-explorer ds-reviewer ds-worker doc-critic; do
       grep -q "^${a} " <<<"$lines" || { printf 'VERIFY agents/%s.md: not visible to opencode\n' "$a"; bad=1; }
     done
@@ -196,13 +197,13 @@ done
 
 # opencode visibility: what will actually load at session start.
 if [ "$HAVE_OPENCODE" -eq 1 ]; then
-  lines="$(opencode agent list 2>/dev/null || true)"
+  lines="$(oc_agent_list || true)"
   vis_ok=1
   for a in ds-explorer ds-reviewer ds-worker doc-critic; do
     grep -q "^${a} " <<<"$lines" || vis_ok=0
   done
   if [ "$vis_ok" -eq 1 ]; then summary+=("SUMMARY opencode: ok")
-  else summary+=("SUMMARY opencode: not-verified (agents installed but not visible in 'opencode agent list')"); fi
+  else summary+=("SUMMARY opencode: not-verified (agents installed but not visible in 'opencode debug agents')"); fi
 else
   summary+=("SUMMARY opencode: not-verified (files-only mode)")
 fi

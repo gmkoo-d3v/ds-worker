@@ -26,7 +26,7 @@ cat > "$FAKE_BIN/opencode" <<'EOF'
 set -euo pipefail
 case "${1:-}" in
   models) printf 'gx10/deepseek-v4-flash-exl3-cross\ngx10/qwen3.8-27b\n'; exit 0 ;;
-  agent)  printf 'ds-explorer (all)\nds-worker (all)\n'; exit 0 ;;
+  debug)  printf '[{"name":"ds-explorer","mode":"all"},{"name":"ds-worker","mode":"all"}]\n'; exit 0 ;;
   run)    ;;
   *)      exit 0 ;;
 esac

@@ -11,7 +11,7 @@ running on OpenCode headless.
         └────────────┬─────────────┘
                      │ ds-worker (Bash)
         ┌────────────▼─────────────┐
-        │ opencode run (one-shot) │  no shared control port
+        │ opencode run --standalone│  OpenCode v2, private server per call
         │ (+ OmO Slim, optional)  │
         └────────────┬────────────┘
                      │ --agent [--model]
@@ -54,12 +54,22 @@ ds-worker omo council "Debate whether to split the auth service."
 ds-worker omo ds-explorer "Find every call site of checkToken in src/."
 ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
 ds-worker critic --file docs/plan/foo.md "Audit the supplied document before delivery."
+ds-worker direct --file test.log "Rank the root-cause candidates."   # no OpenCode, no tools
 sync-agents                 # check persona registry drift
 sync-agents --install       # install managed persona updates
 ```
 
+`direct` sends one chat completion straight to the GX10 endpoint with the
+files inlined. It needs only `curl` and `jq`, so it keeps working when the
+OpenCode CLI changes; the model has no tools, so hand it everything it needs.
+
 ```bash
-ds-serve start|status|stop    # optional manual resident backend for TUI observation
+ds-serve start|status|stop    # resident backend — not yet ported to the OpenCode v2 server
+```
+
+```bash
+bash tests/test_opencode_v2_contract.sh                    # CLI shape vs. the installed opencode
+DS_CONTRACT_LIVE=1 bash tests/test_opencode_v2_contract.sh # + GX10 round trips
 ```
 
 ## Configuration
@@ -95,7 +105,7 @@ and ignored, and nothing in it is executed.
 | `DS_RECOVERY_IDLE_TIMEOUT` / `DS_RECOVERY_MAX_RUNTIME` | `60` / `180` seconds |
 | `DS_OPENCODE_HOST` / `DS_OPENCODE_PORT` | `127.0.0.1` / `4096` (scans upward if busy) |
 | `DS_PORT_SCAN` | `20` (ports tried from `DS_OPENCODE_PORT`) |
-| `DS_SERVE` | `off` (`auto` opts into a shared backend) |
+| `DS_SERVE` | `off` (`auto` is ignored with a notice until `ds-serve` supports OpenCode v2) |
 | `DS_AUTO` | `1` (passes `--auto`) |
 | `DS_STATE_DIR` | `~/.local/state/ds-worker` |
 
@@ -200,7 +210,7 @@ this behavior with `DS_AUTO_RECOVER_READONLY=0`.
 ./install.sh      # copies real files
 ```
 
-Symlinked definitions appear in `opencode agent list` but are ignored at run time.
+Symlinked definitions appear in `opencode debug agents` but are ignored at run time.
 The resident backend restarts itself when the agent-file fingerprint changes.
 
 ## Run logs

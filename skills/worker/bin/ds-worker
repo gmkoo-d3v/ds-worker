@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # ds-worker — delegate one unit of work to a GX10 Qwen agent running under OpenCode.
+# Built for the OpenCode v2 CLI (see lib/opencode-cli.sh).
 #
 #   ds-worker <role> [options] "<prompt>"
 #   ds-worker <role> [options] -            # prompt on stdin
@@ -11,6 +12,8 @@
 #   critic     cross-model audit of long documents — runs the doc-critic agent;
 #              its model is bound in the agent config, not in this wrapper
 #   omo        gateway to the OMO Slim agents (see "omo agents" below)
+#   direct     one chat completion straight to the GX10 endpoint: no OpenCode,
+#              no tools, files inlined (`ds-worker direct --help`)
 #
 # omo agents (ds-worker omo <agent> "<prompt>"):
 #   oracle | council | librarian | designer | fixer | ds-explorer | ds-reviewer
@@ -44,6 +47,9 @@ while [ -L "$SOURCE_PATH" ]; do
 done
 SELF_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
 . "$SELF_DIR/../lib/process-watchdog.sh"
+. "$SELF_DIR/../lib/opencode-cli.sh"
+. "$SELF_DIR/../lib/model-endpoint.sh"
+. "$SELF_DIR/../lib/direct-call.sh"
 # Shared by ds-worker, ds-serve and ds-doctor: what the file says must be what
 # runs, and what `ds-doctor --config` prints must be what the file says.
 # Handles `key = value`, quoted values, a trailing ` # comment`, and a leading ~.
@@ -142,7 +148,7 @@ die() { printf 'ds-worker: %s\n' "$1" >&2; exit 2; }
 note() { printf 'ds-worker: %s\n' "$1" >&2; }
 
 usage() {
-  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   cat >&2 <<'USAGE'
 
 Examples:
@@ -151,6 +157,7 @@ Examples:
   ds-worker omo ds-explorer "Find every call site of checkToken in src/."
   ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
   ds-worker critic --file docs/plan/foo.md "Audit this document for factual drift before delivery."
+  ds-worker direct --file test.log "Rank the root-cause candidates for this failure."
 
 Each role's model defaults to a primary/fallback chain: the primary model up to
 DS_MODEL_RETRIES times, then the fallback model up to DS_MODEL_RETRIES times,
@@ -165,9 +172,11 @@ own config (cross-model by design, not the local engine): no autodetect, no
 fallback chain; DS_MODEL_CRITIC or --model pin a model deliberately.
 
 options:
-  --dir <path>        working directory for the agent (default: $PWD)
+  --dir <path>        working directory for the agent (default: $PWD); the
+                      OpenCode child is started there (v2 has no run --dir)
   --model <prov/mdl>  override the model for this call (disables the fallback chain)
-  --variant <name>    provider reasoning effort (e.g. high, max, minimal)
+  --variant <name>    provider reasoning effort (e.g. high, max, minimal); sent
+                      as --model provider/model#variant
   --session <id>      continue an existing OpenCode session
   --continue          continue the last session
   --file <path>       attach a file (repeatable)
@@ -177,7 +186,7 @@ options:
   --recover-readonly  enable one read-only session recovery (default)
   --no-recover-readonly  disable read-only session recovery
   --timeout <sec>     legacy alias for --max-runtime
-  --no-serve          one-shot process, do not use the shared backend
+  --no-serve          private one-shot server (run --standalone), not ds-serve
   --json              emit a JSON envelope instead of prose
   --raw               emit the raw NDJSON event stream
   --quiet             suppress the trailer on stderr
@@ -196,7 +205,7 @@ omo gateway:
   the configured local model, the fallback chain and the final-report contract.
   On a host without the OMO Slim preset: if 'orchestrator' is absent but the
   named agent is installed, the same envelope dispatches through the first
-  visible primary agent in `opencode agent list` and the result records
+  visible primary agent in `opencode debug agents` and the result records
   dispatch="omo-fallback-primary"; if the named agent itself is absent, the
   call is refused (exit 2, naming it) before any run is spawned.
   fixer is a potentially WRITING OMO agent: it does not carry the writing
@@ -248,8 +257,10 @@ case "$ROLE" in
       MODEL="$DS_MODEL_REVIEWER"; MODEL_FALLBACK="$DS_MODEL_REVIEWER_FALLBACK"
     fi
     ;;
+  # No OpenCode at all: handled before any opencode check below can refuse it.
+  direct) ds_direct_main "$@" ;;
   -h|--help) usage ;;
-  *) die "unknown role '$ROLE' (expected: explorer | reviewer | worker | critic | omo)" ;;
+  *) die "unknown role '$ROLE' (expected: explorer | reviewer | worker | critic | omo | direct)" ;;
 esac
 
 DIR="$PWD"; VARIANT=""; SESSION=""; CONTINUE=0
@@ -315,6 +326,11 @@ case "$DS_AUTO_RECOVER_READONLY" in
 esac
 
 DIR="$(cd "$DIR" 2>/dev/null && pwd)" || die "--dir does not exist"
+# The child runs inside --dir, so a relative --file must be pinned to the
+# caller's cwd before that move.
+for _i in "${!FILES[@]}"; do
+  case "${FILES[$_i]}" in /*) ;; *) FILES[$_i]="$PWD/${FILES[$_i]}" ;; esac
+done
 case "$DIR" in
   "$HOME"|/)
     # The legacy writing worker, plus omo fixer: an OMO subagent that may write.
@@ -328,7 +344,7 @@ esac
 
 # OMO gateway honesty on hosts without the OMO Slim preset, before anything is
 # spawned. The allowlist routes the five built-ins through the primary agent
-# 'orchestrator'; check `opencode agent list` for what the preset names imply:
+# 'orchestrator'; check the agent list for what the preset names imply:
 #  - the named agent itself absent (council/designer/fixer where the preset was
 #    never installed) -> refuse with exit 2 naming it, no run, no session;
 #  - only 'orchestrator' absent while the named subagent IS installed -> dispatch
@@ -340,7 +356,8 @@ esac
 #    model answered. With the preset installed both checks pass and the behavior
 #    is exactly the orchestrator dispatch described above.
 if [ "$ROLE" = omo ] && [ "$OMO_CONFIGURED" -eq 1 ]; then
-  OMO_AGENT_LIST="$(opencode agent list 2>/dev/null || true)"
+  OMO_AGENT_LIST="$(oc_agent_list)" \
+    || die "could not read the agent list ('opencode debug agents' returned no JSON array)"
   if ! printf '%s\n' "$OMO_AGENT_LIST" | grep -qE "^${OMO_REQUESTED} \((primary|subagent|all)\)$"; then
     die "agent '${OMO_REQUESTED}' not installed — OMO Slim preset not installed on this host; see references/portability.md"
   fi
@@ -348,26 +365,29 @@ if [ "$ROLE" = omo ] && [ "$OMO_CONFIGURED" -eq 1 ]; then
     # First visible primary in list order, name = the line minus its mode
     # suffix (primary names may contain spaces). List order is the established
     # "first primary" pick: the legacy roles below already rely on unsorted
-    # `opencode agent list` order. Do NOT sort: an alphabetical sort can pick
+    # agent-list order. Do NOT sort: an alphabetical sort can pick
     # a preset agent bound to an external seat, which would silently spend
     # tokens this wrapper has no authority over.
     OMO_FALLBACK_PRIMARY="$(printf '%s\n' "$OMO_AGENT_LIST" \
       | awk '/[^[:space:]].* \(primary\)$/ { sub(/ \(primary\)$/, ""); print; exit }')"
     [ -n "$OMO_FALLBACK_PRIMARY" ] \
-      || die "OMO Slim 'orchestrator' is not installed and 'opencode agent list' shows no visible primary agent — cannot dispatch '${OMO_REQUESTED}'"
+      || die "OMO Slim 'orchestrator' is not installed and 'opencode debug agents' shows no visible primary agent — cannot dispatch '${OMO_REQUESTED}'"
     note "OMO Slim 'orchestrator' absent — ran via fallback primary ${OMO_FALLBACK_PRIMARY}; results reflect that agent's model, not OMO's"
     AGENT="$OMO_FALLBACK_PRIMARY"
     DISPATCH="omo-fallback-primary"
   fi
 fi
 
-# `opencode run --agent <unknown>` does NOT fail — it warns on stderr and runs the
-# default agent, which has no permission restrictions. Same for a `mode: subagent`
-# agent. Either way our sandbox silently disappears, so check up front and again
-# after the run. An OMO built-in is expected to be mode=subagent and is never
+# OpenCode v1 `run --agent <unknown>` did NOT fail — it warned on stderr and ran
+# the default agent, which has no permission restrictions; same for a
+# `mode: subagent` agent. v2 rejects an unknown agent with an error event, but
+# the sandbox is too important to rest on one version's behavior, so check up
+# front and again after the run. An OMO built-in is expected to be mode=subagent and is never
 # passed to `opencode run --agent` directly: the check below covers the dispatch
 # agent (orchestrator for the OMO built-ins), which must not be a subagent.
-AGENT_LINE="$(opencode agent list 2>/dev/null | grep "^${AGENT} " || true)"
+AGENT_LIST="$(oc_agent_list)" \
+  || die "could not read the agent list ('opencode debug agents' returned no JSON array)"
+AGENT_LINE="$(printf '%s\n' "$AGENT_LIST" | grep "^${AGENT} " || true)"
 [ -n "$AGENT_LINE" ] || die "agent '$AGENT' is not installed. Run: sync-agents --install (agents only) or install.sh (bootstrap)"
 case "$AGENT_LINE" in
   *"(subagent)"*) die "agent '$AGENT' is mode=subagent; 'opencode run --agent' cannot use it. Set mode: all and re-run sync-agents --install (or install.sh)" ;;
@@ -514,6 +534,7 @@ ds_build_result() {
       session: (map(.sessionID // empty) | last // null),
       text: (map(select(.type == "text") | .part.text // "") | join("")),
       tools: (map(select(.type == "tool_use" or .type == "tool") | (.part.tool // ""))),
+      errors: (map(select(.type == "error") | (.error.message // .error // "error" | tostring))),
       tokens: (map(select(.type == "step_finish") | .part.tokens // empty) | last),
       cost: ((map(select(.type == "step_finish") | .part.cost // 0) | add) // 0),
       events: length,
@@ -570,27 +591,19 @@ ds_build_result() {
 # ds-serve prints the URL of a backend *it* owns. It never hands back a foreign
 # server (e.g. an OpenCode TUI squatting on 4096) — attaching to one of those
 # fails with "Session not found" and would disturb the user's live session.
+# Not yet ported to OpenCode v2: a v2 server requires a password, and its GET
+# /config now serves the web UI with 200, so ds-serve's ownership probe cannot
+# tell its own server from a foreign one. Until it is, every run gets a private
+# --standalone server and DS_SERVE only earns a notice.
 ATTACH=""
 if [ "$DS_SERVE" != "off" ]; then
-  ATTACH="$("$SELF_DIR/ds-serve" start 2>/dev/null || true)"
-  [ -n "$ATTACH" ] || note "shared backend unavailable, falling back to a one-shot process"
+  note "DS_SERVE=$DS_SERVE ignored: ds-serve is not ported to the OpenCode v2 server yet; using a private --standalone server"
 fi
 
 # ---- serving-model autodetect --------------------------------------------------
 # One model is loaded at a time, so /v1/models returns exactly that one.
 
-ds_provider_baseurl() {   # $1 = provider name; reads opencode.jsonc, the one home of the URL
-  local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.jsonc"
-  [ -f "$cfg" ] || return 1
-  jq -r --arg p "$1" '.provider[$p].options.baseURL // empty' "$cfg" 2>/dev/null
-}
-
-ds_detect_served_model() {   # $1 = baseURL ending in /v1; echoes the loaded model id
-  local body
-  body="$(curl -sS -m "$DS_MODEL_DETECT_TIMEOUT" "${1%/}/models" 2>/dev/null)" || return 1
-  [ -n "$body" ] || return 1
-  jq -er '.data[0].id // empty' <<<"$body" 2>/dev/null
-}
+# ds_provider_baseurl and ds_detect_served_model live in lib/model-endpoint.sh.
 
 ds_resolve_served_model() {
   local provider="${MODEL%%/*}" configured="${MODEL#*/}" endpoint detected candidate
@@ -715,16 +728,18 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
   ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.stderr"
 
   # Never pass an empty --model: an OMO-configured call lets the preset choose.
-  ARGS=(run --dir "$DIR" --agent "$AGENT" --format json)
-  [ -n "$MODEL" ]   && ARGS+=(--model "$MODEL")
-  [ -n "$ATTACH" ]  && ARGS+=(--attach "$ATTACH")
-  [ -n "$VARIANT" ] && ARGS+=(--variant "$VARIANT")
+  # No --server means a private --standalone server: v2's default is a shared
+  # background service, which is not the one-shot process DS_SERVE=off promises
+  # and has been seen unable to reach the GX10 box (EHOSTUNREACH).
+  ARGS=(run --agent "$AGENT" --format json)
+  [ -n "$MODEL" ]   && ARGS+=(--model "$(oc_model_ref "$MODEL" "$VARIANT")")
+  if [ -n "$ATTACH" ]; then ARGS+=(--server "$ATTACH"); else ARGS+=(--standalone); fi
   [ -n "$SESSION" ] && ARGS+=(--session "$SESSION")
   [ "$CONTINUE" -eq 1 ] && ARGS+=(--continue)
   [ "$DS_AUTO" = "1" ] && ARGS+=(--auto)
   for f in "${FILES[@]:-}"; do [ -n "$f" ] && ARGS+=(--file "$f"); done
-  # `--file` is a yargs *array* option: without a `--` terminator it swallows the
-  # prompt that follows it and the run dies with "File not found: <prompt>".
+  # `--file` was a yargs *array* option in v1: without a `--` terminator it
+  # swallowed the prompt. v2 accepts the terminator too, so keep it.
   ARGS+=(--)
 
   PROGRESS_INTERVAL_EFFECTIVE="$DS_PROGRESS_INTERVAL"
@@ -735,7 +750,7 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
   ds_start_progress_monitor "$RAW" "$PROGRESS_STOP" "$PROGRESS_INTERVAL_EFFECTIVE"
   RC=0
   ds_run_with_watchdog "$DS_IDLE_TIMEOUT" "$DS_MAX_RUNTIME" "$RAW" "$ERR" \
-    opencode "${ARGS[@]}" "$ENVELOPE" || RC=$?
+    oc_in_dir "$DIR" opencode "${ARGS[@]}" "$ENVELOPE" || RC=$?
   ds_stop_progress_monitor "$PROGRESS_STOP"
 
   if [ "$RC" -eq 124 ]; then
@@ -779,10 +794,9 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
     RECOVERY_ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.stderr"
     RECOVERY_STOP="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.progress.stop"
     RECOVERY_PROMPT="Your previous read-only ${CONTRACT_ROLE} run ended before emitting the required final report. Do not use tools or perform more searches. Using only the work already completed in this session, emit the required ${CONTRACT_ROLE} report now in the exact required format. If evidence is incomplete, say so explicitly in the required gap section. Do not claim verification without evidence."
-    RECOVERY_ARGS=(run --dir "$DIR" --agent "$AGENT" --format json)
-    [ -n "$MODEL" ] && RECOVERY_ARGS+=(--model "$MODEL")
-    [ -n "$ATTACH" ] && RECOVERY_ARGS+=(--attach "$ATTACH")
-    [ -n "$VARIANT" ] && RECOVERY_ARGS+=(--variant "$VARIANT")
+    RECOVERY_ARGS=(run --agent "$AGENT" --format json)
+    [ -n "$MODEL" ] && RECOVERY_ARGS+=(--model "$(oc_model_ref "$MODEL" "$VARIANT")")
+    if [ -n "$ATTACH" ]; then RECOVERY_ARGS+=(--server "$ATTACH"); else RECOVERY_ARGS+=(--standalone); fi
     # Keep the explicit session id while marking this as a continuation. The
     # former selects the exact timed-out session; the latter prevents OpenCode
     # from treating recovery as a fresh run when the watchdog interrupted it.
@@ -801,7 +815,7 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
     ds_start_progress_monitor "$RECOVERY_RAW" "$RECOVERY_STOP" "$PROGRESS_INTERVAL_EFFECTIVE"
     RECOVERY_RC=0
     ds_run_with_watchdog "$DS_RECOVERY_IDLE_TIMEOUT" "$DS_RECOVERY_MAX_RUNTIME" "$RECOVERY_RAW" "$RECOVERY_ERR" \
-      env OPENCODE_CONFIG_CONTENT="$RECOVERY_CONFIG_CONTENT" \
+      oc_in_dir "$DIR" env OPENCODE_CONFIG_CONTENT="$RECOVERY_CONFIG_CONTENT" \
       opencode "${RECOVERY_ARGS[@]}" "$RECOVERY_PROMPT" || RECOVERY_RC=$?
     ds_stop_progress_monitor "$RECOVERY_STOP"
     if grep -q "Falling back to default agent" "$RECOVERY_ERR" 2>/dev/null; then
@@ -912,6 +926,7 @@ case "$OUT_MODE" in
       printf '%s\n' "$FINAL_TEXT"
     else
       note "no text output; stderr follows"
+      printf '%s' "$FINAL_RESULT" | jq -r '.errors[]? | "ds-worker: opencode error: \(.)"' >&2
       sed -n '1,40p' "$ERR" >&2
       if [ "$RECOVERY_ATTEMPTED" -eq 1 ] && [ -f "$RECOVERY_ERR" ]; then
         sed -n '1,40p' "$RECOVERY_ERR" >&2

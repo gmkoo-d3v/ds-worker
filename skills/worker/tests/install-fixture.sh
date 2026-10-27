@@ -51,14 +51,14 @@ AGENT_DIR="$XDG_CONFIG_HOME/opencode/agent"
 CONFIG_FILE="$XDG_CONFIG_HOME/ds-worker/config"
 LEDGER="$XDG_STATE_HOME/ds-worker/installed.sha256"
 
-# opencode shim: answers `agent list` from the 4 personas, nothing else.
+# opencode shim: answers v2 `debug agents` from the 4 personas, nothing else.
 # Never execs a model, never touches the network.
 cat >"$SHIM/opencode" <<'SHIM'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "agent list")
-    printf '%s\n' "ds-explorer (primary)" "ds-reviewer (primary)" \
-      "ds-worker (primary)" "doc-critic (primary)" ;;
+  "debug agents")
+    printf '%s\n' '[{"name":"ds-explorer","mode":"primary"},{"name":"ds-reviewer","mode":"primary"},' \
+      '{"name":"ds-worker","mode":"primary"},{"name":"doc-critic","mode":"primary"}]' ;;
 esac
 exit 0
 SHIM

@@ -19,9 +19,11 @@ mkdir -p "$FAKE_BIN" "$STATE_DIR" "$ENV_CAPTURE_DIR" "$ARGV_DIR"
 cat > "$FAKE_BIN/opencode" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# v2 `opencode debug agents` emits a JSON array; write the rows as `name (mode)`.
+v2_agents() { jq -Rn '[inputs | capture("^(?<name>.+) \\((?<mode>[a-z]+)\\)$") + {hidden: false}]'; }
 
-if [ "${1:-}" = "agent" ] && [ "${2:-}" = "list" ]; then
-  printf 'ds-explorer (all)\n'
+if [ "${1:-}" = "debug" ] && [ "${2:-}" = "agents" ]; then
+  { printf 'ds-explorer (all)\n'; } | v2_agents
   exit 0
 fi
 
@@ -74,6 +76,8 @@ EOF
 chmod +x "$FAKE_BIN/opencode"
 
 export PATH="$FAKE_BIN:$PATH"
+# Not an autodetect test: never probe the real GX10 endpoint from opencode.jsonc.
+export DS_MODEL_AUTODETECT=0
 export DS_STATE_DIR="$STATE_DIR"
 export DS_TEST_ENV_CAPTURE_DIR="$ENV_CAPTURE_DIR"
 export DS_TEST_ARGV_DIR="$ARGV_DIR"

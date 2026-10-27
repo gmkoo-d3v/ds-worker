@@ -2,6 +2,20 @@
 # ds-doctor — check that delegation to the GX10 Qwen agent is actually wired up.
 set -uo pipefail
 
+# install.sh links this file into ~/.local/bin; resolve that to find lib/.
+SOURCE_PATH="${BASH_SOURCE[0]}"
+SOURCE_HOPS=0
+while [ -L "$SOURCE_PATH" ]; do
+  SOURCE_HOPS=$((SOURCE_HOPS + 1))
+  [ "$SOURCE_HOPS" -le 40 ] || { printf 'ds-doctor: symlink chain too deep\n' >&2; exit 2; }
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+  SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+  case "$SOURCE_PATH" in /*) ;; *) SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH" ;; esac
+done
+SELF_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+. "$SELF_DIR/../lib/opencode-cli.sh"
+. "$SELF_DIR/../lib/model-endpoint.sh"
+
 DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
 
 # One list, so --config can report a default without invoking the other tools.
@@ -127,9 +141,7 @@ if command -v opencode >/dev/null; then
       || fail "model $m not available (opencode models | grep gx10)"
   done
 
-  cfg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.jsonc"
-  endpoint="${DS_MODEL_ENDPOINT:-$(jq -r --arg p "${DS_MODEL_WORKER%%/*}" \
-    '.provider[$p].options.baseURL // empty' "$cfg" 2>/dev/null)}"
+  endpoint="${DS_MODEL_ENDPOINT:-$(ds_provider_baseurl "${DS_MODEL_WORKER%%/*}")}"
   if [ -n "$endpoint" ]; then
     served="$(curl -sS -m 5 "${endpoint%/}/models" 2>/dev/null | jq -r '.data[0].id // empty' 2>/dev/null || true)"
     if [ -n "$served" ]; then
@@ -139,7 +151,7 @@ if command -v opencode >/dev/null; then
     fi
   fi
 
-  agents="$(opencode agent list 2>/dev/null)"
+  agents="$(oc_agent_list)" || fail "'opencode debug agents' returned no JSON array — cannot list agents"
   agent_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
   for a in ds-explorer ds-reviewer ds-worker doc-critic; do
     line="$(printf '%s\n' "$agents" | grep "^${a} " || true)"
@@ -194,7 +206,7 @@ SERVE="$(dirname "$(command -v ds-serve || echo "$(dirname "$0")/ds-serve")")/ds
 if url="$("$SERVE" url 2>/dev/null)"; then
   pass "backend up at $url (ours)"
 else
-  info "no backend of ours running (ds-worker starts one on demand)"
+  info "no backend of ours running (ds-worker runs --standalone; ds-serve is not ported to OpenCode v2)"
 fi
 
 [ "$FAIL" -eq 0 ] && echo "all checks passed" || echo "some checks failed" >&2

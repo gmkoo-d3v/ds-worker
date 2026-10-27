@@ -17,21 +17,22 @@ mkdir -p "$FAKE_BIN" "$STATE_DIR"
 cat > "$FAKE_BIN/opencode" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# v2 `opencode debug agents` emits a JSON array; write the rows as `name (mode)`.
+v2_agents() { jq -Rn '[inputs | capture("^(?<name>.+) \\((?<mode>[a-z]+)\\)$") + {hidden: false}]'; }
 
-if [ "${1:-}" = "agent" ] && [ "${2:-}" = "list" ]; then
-  printf 'ds-explorer (all)\n'
-  printf 'ds-worker (all)\n'
+if [ "${1:-}" = "debug" ] && [ "${2:-}" = "agents" ]; then
+  { printf 'ds-explorer (all)\n';   printf 'ds-worker (all)\n'; } | v2_agents
   exit 0
 fi
 
 [ "${1:-}" = "run" ] || exit 0
 
-model="" dir=""
+# v2 has no run --dir: ds-worker starts the child inside --dir.
+model="" dir="$PWD"
 prev=""
 for arg in "$@"; do
   case "$prev" in
     --model) model="$arg" ;;
-    --dir)   dir="$arg" ;;
   esac
   prev="$arg"
 done
@@ -75,6 +76,8 @@ EOF
 chmod +x "$FAKE_BIN/opencode"
 
 export PATH="$FAKE_BIN:$PATH"
+# Not an autodetect test: never probe the real GX10 endpoint from opencode.jsonc.
+export DS_MODEL_AUTODETECT=0
 export DS_STATE_DIR="$STATE_DIR"
 export DS_CONFIG="$TEST_ROOT/no-such-config"
 export DS_MODEL_EXPLORER="test/primary-model"

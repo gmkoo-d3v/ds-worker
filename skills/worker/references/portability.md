@@ -19,7 +19,7 @@ URLs and credentials when synchronizing the toolkit.
 **without** OMO Slim the script does not fail silently:
 
 - `orchestrator` absent → deterministic fallback: the first `mode: primary`
-  agent from `opencode agent list` runs the task; the result JSON carries
+  agent from `opencode debug agents` runs the task; the result JSON carries
   `dispatch: "omo-fallback-primary"` and a stderr note. Model ownership is
   therefore always honest in receipts.
 - `council` / `designer` / `fixer` (and any named agent not in the list) →

@@ -36,19 +36,23 @@ mkdir -p "$FAKE_BIN" "$STATE_DIR" "$ARGV_DIR"
 cat > "$FAKE_BIN/opencode" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# v2 `opencode debug agents` emits a JSON array; write the rows as `name (mode)`.
+v2_agents() { jq -Rn '[inputs | capture("^(?<name>.+) \\((?<mode>[a-z]+)\\)$") + {hidden: false}]'; }
 
 case "${1:-}" in
-  agent)
-    [ "${2:-}" = "list" ] || exit 0
-    printf 'council (subagent)\n'
-    printf 'designer (subagent)\n'
-    printf 'ds-explorer (all)\n'
-    printf 'ds-reviewer (all)\n'
-    printf 'ds-worker (all)\n'
-    printf 'fixer (subagent)\n'
-    printf 'librarian (subagent)\n'
-    printf 'oracle (subagent)\n'
-    printf 'orchestrator (primary)\n'
+  debug)
+    [ "${2:-}" = "agents" ] || exit 0
+    {
+      printf 'council (subagent)\n'
+      printf 'designer (subagent)\n'
+      printf 'ds-explorer (all)\n'
+      printf 'ds-reviewer (all)\n'
+      printf 'ds-worker (all)\n'
+      printf 'fixer (subagent)\n'
+      printf 'librarian (subagent)\n'
+      printf 'oracle (subagent)\n'
+      printf 'orchestrator (primary)\n'
+    } | v2_agents
     exit 0
     ;;
   models)
