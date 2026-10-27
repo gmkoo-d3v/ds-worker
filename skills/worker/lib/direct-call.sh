@@ -108,7 +108,7 @@ ${prompt}"
     (fromjson? // null) as $body
     | ($body.choices[0].message.content // "" | sub("^\\s+"; "") | sub("\\s+$"; "")) as $text
     | {
-        role: "direct", agent: null, dispatch: "direct",
+        role: "direct", agent: null,
         model: $model, endpoint: $endpoint, dir: $dir,
         exit: $rc, http_status: ($http | tonumber? // 0),
         text: $text,

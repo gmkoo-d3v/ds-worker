@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Read-only exploration-budget notice.
 #
-# The initial prompt of a READ-ONLY run (legacy explorer/reviewer and the omo
-# ds-explorer/ds-reviewer aliases) must carry one advisory budget notice,
-# appended after the envelope. Writing `worker`, the OMO-configured built-ins,
-# and the read-only recovery prompt must not carry it. The notice is guidance
+# The initial prompt of a READ-ONLY run (explorer/reviewer) must carry one
+# advisory budget notice, appended after the envelope. Writing `worker` and the
+# read-only recovery prompt must not carry it. The notice is guidance
 # only — the wrapper neither counts nor enforces steps — so the assertion is
 # purely about the prompt bytes the fake opencode receives.
 set -euo pipefail
@@ -42,12 +41,6 @@ case "${1:-}" in
       printf 'ds-explorer (all)\n'
       printf 'ds-reviewer (all)\n'
       printf 'ds-worker (all)\n'
-      printf 'oracle (subagent)\n'
-      printf 'council (subagent)\n'
-      printf 'librarian (subagent)\n'
-      printf 'designer (subagent)\n'
-      printf 'fixer (subagent)\n'
-      printf 'orchestrator (primary)\n'
     } | v2_agents
     exit 0
     ;;
@@ -60,13 +53,6 @@ case "${1:-}" in
 esac
 
 argv_dir="${DS_TEST_ARGV_DIR:?}"
-if [ "${1:-}" = "agent" ] && [ "${2:-}" = "list" ]; then
-  printf 'ds-explorer (all)\n'
-  printf 'ds-reviewer (all)\n'
-  printf 'ds-worker (all)\n'
-  printf 'orchestrator (primary)\n'
-  exit 0
-fi
 [ "${1:-}" = "run" ] || exit 0
 n=0
 [ -f "$argv_dir/.count" ] && n="$(<"$argv_dir/.count")"
@@ -135,9 +121,7 @@ fail() {
 # ---- 1. read-only roles carry exactly one notice, appended after the envelope --
 for spec in \
   "direct_explorer|explorer|ds-explorer" \
-  "direct_reviewer|reviewer|ds-reviewer" \
-  "omo_explorer|omo ds-explorer|ds-explorer" \
-  "omo_reviewer|omo ds-reviewer|ds-reviewer"; do
+  "direct_reviewer|reviewer|ds-reviewer"; do
   IFS='|' read -r name role agent <<<"$spec"
   rm -f "$ARGV_DIR"/*.argv "$ARGV_DIR/.count"
   prompt="PROMPT-$name"
@@ -198,14 +182,9 @@ $argv" ;;
   printf 'ds-worker %s prompt carries exactly one budget notice after the envelope: PASS\n' "$role"
 done
 
-# ---- 2. writing worker and OMO-configured built-ins carry no notice ------------
+# ---- 2. the writing worker carries no notice -----------------------------------
 for spec in \
-  "worker|worker" \
-  "omo_oracle|omo oracle" \
-  "omo_council|omo council" \
-  "omo_librarian|omo librarian" \
-  "omo_designer|omo designer" \
-  "omo_fixer|omo fixer"; do
+  "worker|worker"; do
   IFS='|' read -r name role <<<"$spec"
   rm -f "$ARGV_DIR"/*.argv "$ARGV_DIR/.count"
   set -- $role
@@ -230,14 +209,11 @@ for spec in \
 done
 
 # ---- 2b. the same roles DO carry the notice when recovery is disabled ----------
-# Proves the exclusion above is about the OMO-configured dispatch and the writing
-# role, not about the agent: with DS_AUTO_RECOVER_READONLY=0 the read-only roles
+# Proves the exclusion above is about the writing role, not about the agent: with DS_AUTO_RECOVER_READONLY=0 the read-only roles
 # still get exactly one notice.
 for spec in \
   "no_recover_explorer|explorer|ds-explorer" \
-  "no_recover_reviewer|reviewer|ds-reviewer" \
-  "no_recover_omo_explorer|omo ds-explorer|ds-explorer" \
-  "no_recover_omo_reviewer|omo ds-reviewer|ds-reviewer"; do
+  "no_recover_reviewer|reviewer|ds-reviewer"; do
   IFS='|' read -r name role agent <<<"$spec"
   rm -f "$ARGV_DIR"/*.argv "$ARGV_DIR/.count"
   set -- $role

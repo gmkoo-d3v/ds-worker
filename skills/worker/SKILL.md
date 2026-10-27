@@ -36,7 +36,6 @@ that are hard to undo, anything you will say to the user, commits, pushes, PRs.
 
 ```bash
 ds-worker <role> [--dir <path>] "<instruction>"
-ds-worker omo <agent> [--dir <path>] "<instruction>"
 ds-worker direct [--file <path>]... "<instruction>"
 ```
 
@@ -44,16 +43,12 @@ ds-worker direct [--file <path>]... "<instruction>"
 ds-worker explorer "Find every call site of checkToken in src/ — list all of them, not a sample. file:line required."
 ds-worker reviewer --file test.log "Rank the root-cause candidates for this failure, reading the log to its end."
 ds-worker worker "checkToken at src/auth.ts:42 returns 500 for an expired token instead of 401. Make it 401. Verify: npm test -- auth"
-ds-worker omo oracle "Review this design for failure modes."
-ds-worker omo council "Debate whether to split the auth service."
-ds-worker omo ds-explorer "Find every call site of checkToken in src/."
-ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
 ds-worker critic --file docs/plan/foo.md "Audit this document for factual drift before delivery."
 ds-worker direct --file test.log "Rank the root-cause candidates for this failure."
 ```
 
 `explorer` / `reviewer` / `worker` run on `DS_MODEL` (or their per-role
-override). `critic` is the fourth persona: it dispatches the global `doc-critic`
+override). `critic` is the fourth persona: it runs the global `doc-critic`
 agent (`~/.config/opencode/agent/doc-critic.md`) on `DS_MODEL_CRITIC` — a model
 other than `DS_MODEL` is the point of the role; left empty, OpenCode's default
 model answers. No autodetect and no fallback chain apply to it. Required final
@@ -142,21 +137,6 @@ bypasses this chain and runs exactly that model once. For the writing
 confirmed unchanged since the chain started — see "Never treat the result as
 fact" below for why a writing role does not retry blindly otherwise.
 
-The `omo` gateway has a strict allowlist: `oracle`, `council`, `librarian`,
-`designer`, `fixer`, `ds-explorer`, and `ds-reviewer`. OMO built-ins run without
-`--model` by default, so the active OMO Slim preset chooses its model, variants,
-seat arrays, and external providers. The wrapper performs one OMO attempt and
-does not blindly retry a full Council. The five built-ins (`oracle`, `council`,
-`librarian`, `designer`, `fixer`) are OpenCode subagents, so each runs through
-the primary `orchestrator` with `task(subagent_type='<agent>')`: `council`
-collects every configured seat and synthesizes, the others request their named
-subagent once. A `(subagent)` mode in `opencode debug agents` is expected for
-these built-ins and is only a problem if you pass such an agent directly to
-`opencode run --agent`; do not reinstall to "fix" it. The `ds-explorer`
-and `ds-reviewer` gateway aliases retain the local DS model and final-report
-contracts. `omo fixer` may edit files but does not receive the legacy writing
-worker's git-safety contract (it is still refused for `--dir $HOME` or `/`).
-
 ## Slow local reasoning models
 
 OpenCode's provider options have two separate protections:
@@ -222,10 +202,9 @@ gaps. The notice is guidance in the prompt only — the wrapper does not count o
 enforce tool calls, and `steps` is not a tool-call quota. Explicit gaps are the
 required way to end a read-only run that ran out of budget.
 
-JSON results include `agent` and `dispatch`. OMO-configured calls use
-`dispatch: "omo-configured"`, report `agent: "orchestrator"` (the OMO subagents
-are reached through it via `task(subagent_type=...)`), and report `model: null`
-when the preset selected the model; explicit `--model` reports the pinned model.
+JSON results include `agent` and `model`: `model: null` means a critic call
+with no `DS_MODEL_CRITIC`, answered by OpenCode's default model; explicit
+`--model` reports the pinned model.
 
 ## Writing the instruction
 

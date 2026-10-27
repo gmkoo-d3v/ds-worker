@@ -16,17 +16,15 @@ OpenCode can reach — running as sandboxed OpenCode agents. The command is
         ┌────────────▼─────────────┐
         │ opencode run --standalone│  OpenCode v2: private server per call
         │   (or --server: ds-serve)│  DS_SERVE=auto, password-protected
-        │ (+ OmO Slim, optional)   │
         └────────────┬─────────────┘
                      │ --agent --model $DS_MODEL
        ┌─────────────┼─────────────┐
        ▼             ▼             ▼
   ds-explorer   ds-worker    ds-reviewer
    read-only     can write    read-only
-                     │
-                     ▼
-              omo <agent> gateway          ds-worker direct
-              OMO Slim preset / Council    one chat completion, no OpenCode
+
+  ds-worker critic   doc-critic, a second model's audit
+  ds-worker direct   one chat completion, no OpenCode, no tools
 ```
 
 The supervisor decomposes the task, decides, and verifies everything that comes
@@ -72,7 +70,6 @@ ds-worker reviewer --file test.log "Rank the root-cause candidates for this fail
 ds-worker worker "checkToken at src/auth.ts:42 returns 500 for an expired token. Make it 401. Verify: npm test -- auth"
 ds-worker critic --file docs/plan/foo.md "Audit the supplied document before delivery."
 ds-worker direct --file test.log "Rank the root-cause candidates."   # no OpenCode, no tools
-ds-worker omo oracle "Review this design for failure modes."         # needs OMO Slim
 sync-agents                 # check persona registry drift
 sync-agents --install       # install managed persona updates
 ```
@@ -164,15 +161,6 @@ is kept as is; a hosted API listing several models keeps its pin.
   unchanged since the chain started — otherwise it stops immediately and
   hands the partial result back to the supervisor. See "Safety model" below.
 
-The optional `omo` gateway (needs the OMO Slim OpenCode plugin) accepts only
-`oracle`, `council`, `librarian`, `designer`, `fixer`, `ds-explorer`, and
-`ds-reviewer`. OMO built-ins omit `--model`, so the active
-OMO Slim preset selects the model, including configured external seats. The
-five built-ins are OpenCode subagents, so each dispatches the primary
-`orchestrator` with `task(subagent_type='<agent>')` — `council` asks for every
-configured seat and a synthesis, the others request their named subagent once;
-the wrapper makes one attempt and leaves seat/model fallback to OMO Slim.
-
 For a slow local reasoning model, set the provider's `chunkTimeout` and absolute
 `timeout` in OpenCode's provider configuration. `ds-worker` separately watches
 NDJSON output activity and enforces `DS_MAX_RUNTIME`.
@@ -202,13 +190,9 @@ NDJSON output activity and enforces `DS_MAX_RUNTIME`.
   in `opencode.jsonc` would otherwise hand every agent its tools — a shell
   included — regardless of `bash: deny`. The wildcard deny covers them; the
   personas allow back a named read-only set (`serena_find_symbol`, …).
-- The legacy `ds-worker` role is the only role with the wrapper's documented
-  writing contract. The OMO `fixer` gateway is explicitly potentially writable
-  and does not inherit the legacy worker's git-safety guard; review its diff
-  before accepting any result. Committing, pushing, PRs and dependency changes
-  remain supervisor responsibilities.
-- A writing role refuses to run when `--dir` is `$HOME` or `/`; `omo fixer` is
-  treated as writing for this guard.
+- `worker` is the only role that may write. Committing, pushing, PRs and
+  dependency changes remain supervisor responsibilities.
+- The writing role refuses to run when `--dir` is `$HOME` or `/`.
 - The writing `worker` role's primary/fallback chain never advances past an
   attempt that may have edited files: it snapshots `git status --porcelain`
   in `--dir` before the chain starts and re-checks it after every failed
@@ -227,11 +211,9 @@ saved under `DS_STATE_DIR`. The `outcome` field distinguishes `CLEAN_RESULT`,
 own git-guarded primary/fallback chain (see "Safety model"), the supervisor
 should never re-invoke a writing role automatically.
 
-JSON results also include `agent` and `dispatch`. An OMO-configured invocation
-reports `dispatch: "omo-configured"`, `agent: "orchestrator"` (the subagents are
-reached through it via `task(subagent_type=...)`), and `model: null` when the
-active OMO Slim preset selected the model; the legacy DS paths continue to
-report their model.
+JSON results also include `agent` (the OpenCode agent that ran) and `model`
+(`null` for a critic call with no `DS_MODEL_CRITIC`, where OpenCode's default
+model answered).
 
 The wrapper's idle timer resets on every NDJSON write, including reasoning and
 tool events, while `DS_MAX_RUNTIME` is an independent absolute cap. Numeric

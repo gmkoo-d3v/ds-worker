@@ -17,17 +17,15 @@ Claude나 Codex를 **감독자(supervisor)** 자리에 두고, 넓고 반복적�
         ┌────────────▼─────────────┐
         │ opencode run --standalone│  OpenCode v2: 호출마다 전용 서버
         │   (or --server: ds-serve)│  DS_SERVE=auto, 비밀번호 보호
-        │ (+ OmO Slim, 선택)       │
         └────────────┬─────────────┘
                      │ --agent --model $DS_MODEL
        ┌─────────────┼─────────────┐
        ▼             ▼             ▼
   ds-explorer   ds-worker    ds-reviewer
    읽기 전용     쓰기 가능    읽기 전용
-                     │
-                     ▼
-              omo <agent> gateway          ds-worker direct
-              OMO Slim preset / Council    OpenCode 없이 채팅 요청 한 번
+
+  ds-worker critic   doc-critic, 다른 모델의 검토
+  ds-worker direct   OpenCode·도구 없이 채팅 요청 한 번
 ```
 
 감독자가 작업을 나누고, 결정하고, 돌아온 결과를 모두 검증합니다. 워커는
@@ -74,7 +72,6 @@ ds-worker reviewer --file test.log "Rank the root-cause candidates for this fail
 ds-worker worker "checkToken at src/auth.ts:42 returns 500 for an expired token. Make it 401. Verify: npm test -- auth"
 ds-worker critic --file docs/plan/foo.md "Audit the supplied document before delivery."
 ds-worker direct --file test.log "Rank the root-cause candidates."   # no OpenCode, no tools
-ds-worker omo oracle "Review this design for failure modes."         # needs OMO Slim
 sync-agents                 # check persona registry drift
 sync-agents --install       # install managed persona updates
 ```
@@ -163,15 +160,6 @@ ds-doctor --config        # every setting, its value, and where that value came 
   때와 달라진 것이 없다고 확인될 때만 다음 시도로 넘어갑니다. 그렇지 않으면
   바로 멈추고 중간 결과를 감독자에게 넘깁니다. 아래 "안전 모델"을 보세요.
 
-선택 기능인 `omo` 게이트웨이(OMO Slim OpenCode 플러그인 필요)는 `oracle`,
-`council`, `librarian`, `designer`, `fixer`, `ds-explorer`, `ds-reviewer`만
-받습니다. OMO 내장 에이전트에는 `--model`을 넘기지 않으므로, 켜져 있는 OMO Slim
-preset이 외부 좌석을 포함해 모델을 고릅니다. 내장 에이전트 다섯 개는 OpenCode
-subagent라서 각각 primary인 `orchestrator`에게
-`task(subagent_type='<agent>')`로 맡깁니다. `council`은 설정된 모든 좌석의 답과
-종합을 요청하고, 나머지는 해당 subagent를 한 번 부릅니다. 래퍼는 한 번만 시도하고
-좌석·모델 fallback은 OMO Slim에 맡깁니다.
-
 느린 로컬 추론 모델이라면 OpenCode provider 설정에서 `chunkTimeout`과 전체
 `timeout`을 정하세요. `ds-worker`는 이와 별도로 NDJSON 출력 활동을 지켜보고
 `DS_MAX_RUNTIME`을 적용합니다.
@@ -201,12 +189,9 @@ subagent라서 각각 primary인 `orchestrator`에게
   서버는 `bash: deny`와 상관없이 셸을 포함한 자기 도구를 모든 에이전트에게
   넘깁니다. 와일드카드 deny가 이것을 막고, 페르소나는 이름을 붙인 읽기 전용
   도구만 다시 허용합니다(`serena_find_symbol` 등).
-- 쓰기 계약이 문서로 정해진 역할은 `ds-worker` 하나뿐입니다. OMO `fixer`
-  게이트웨이는 파일을 쓸 수 있고 이 git 안전장치를 물려받지 않으므로, 결과를
-  받기 전에 diff를 확인하세요. 커밋, push, PR, 의존성 변경은 계속 감독자의
-  몫입니다.
-- 쓰기 역할은 `--dir`이 `$HOME`이나 `/`이면 실행을 거부합니다. 이 검사에서는
-  `omo fixer`도 쓰기 역할로 봅니다.
+- 파일을 쓸 수 있는 역할은 `worker` 하나뿐입니다. 커밋, push, PR, 의존성 변경은
+  계속 감독자의 몫입니다.
+- 쓰기 역할은 `--dir`이 `$HOME`이나 `/`이면 실행을 거부합니다.
 - 쓰기 역할 `worker`의 primary/fallback 순서는 파일을 고쳤을 수 있는 시도를
   넘어서 진행하지 않습니다. 시작 전에 `--dir`의 `git status --porcelain`을 떠
   두고, 실패한 시도마다 다시 비교해서 하나라도 다르면 멈춥니다. `--dir`이 git
@@ -224,10 +209,9 @@ subagent라서 각각 primary인 `orchestrator`에게
 `ds-worker`가 git으로 지키는 primary/fallback 순서("안전 모델" 참고) 말고는,
 감독자가 쓰기 역할을 자동으로 다시 부르면 안 됩니다.
 
-JSON 결과에는 `agent`와 `dispatch`도 들어 있습니다. OMO 설정으로 부른 호출은
-`dispatch: "omo-configured"`, `agent: "orchestrator"`(subagent는 그 안에서
-`task(subagent_type=...)`로 불림), 그리고 OMO Slim preset이 모델을 골랐다면
-`model: null`을 보고합니다. 기존 DS 경로는 계속 자기 모델을 보고합니다.
+JSON 결과에는 실제로 실행된 OpenCode 에이전트(`agent`)와 모델(`model`)도
+들어 있습니다. `DS_MODEL_CRITIC` 없이 부른 critic은 OpenCode 기본 모델이 답하므로
+`model: null`입니다.
 
 래퍼의 유휴 타이머는 추론·도구 이벤트를 포함해 NDJSON이 쓰일 때마다 다시
 시작되고, `DS_MAX_RUNTIME`은 이와 별개인 전체 상한입니다. 숫자로 된 진행 알림은

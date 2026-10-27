@@ -130,6 +130,12 @@ mkdir -p "$TEST_ROOT/nomodel"; RC=0
   || fail "no model" "expected exit 2 before any run, got $RC: $(cat "$TEST_ROOT/nomodel.err")"
 printf 'ds-worker refuses to run a local role with no model configured: PASS\n'
 
+# ---- the removed omo gateway is an unknown role -------------------------------------
+RC=0; "$DS_WORKER" omo oracle "x" >/dev/null 2>"$TEST_ROOT/omo.err" || RC=$?
+[ "$RC" -eq 2 ] && grep -q "unknown role 'omo'" "$TEST_ROOT/omo.err" \
+  || fail "omo" "expected the removed omo role to be refused, got $RC: $(cat "$TEST_ROOT/omo.err")"
+printf 'ds-worker refuses the removed omo role: PASS\n'
+
 # ---- agent list: cold-start [] is retried -------------------------------------------
 DS_TEST_COLD="$TEST_ROOT/cold.flag" run_case cold explorer --dir "$WORK_DIR" --json --quiet "map"
 [ -e "$TEST_ROOT/cold.flag" ] || fail "cold" "stub never served the cold-start []"

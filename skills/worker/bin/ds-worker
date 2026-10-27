@@ -10,20 +10,10 @@
 #   explorer   read-only codebase mapping, repeated search, candidate gathering
 #   reviewer   read-only analysis of test logs, stack traces, diffs
 #   worker     tightly specified implementation (can edit files and run commands)
-#   critic     cross-model audit of long documents — runs the doc-critic agent;
-#              its model is bound in the agent config, not in this wrapper
-#   omo        gateway to the OMO Slim agents (see "omo agents" below)
+#   critic     cross-model audit of long documents — runs the doc-critic agent
+#              on DS_MODEL_CRITIC
 #   direct     one chat completion straight to the model endpoint: no OpenCode,
 #              no tools, files inlined (`ds-worker direct --help`)
-#
-# omo agents (ds-worker omo <agent> "<prompt>"):
-#   oracle | council | librarian | designer | fixer | ds-explorer | ds-reviewer
-#   The active OMO Slim preset picks the model for oracle, council, librarian,
-#   designer and fixer — no --model is passed unless you give one explicitly.
-#   Those five built-ins are OpenCode subagents, so each dispatches the primary
-#   agent 'orchestrator' (or the fallback primary, below) via task(subagent_type='<agent>').
-#   ds-explorer and ds-reviewer keep their configured local model and
-#   final-report contract.
 #
 # The caller is the supervisor. Treat everything this prints as a claim to be
 # verified, not as an established fact.
@@ -155,14 +145,12 @@ die() { printf 'ds-worker: %s\n' "$1" >&2; exit 2; }
 note() { printf 'ds-worker: %s\n' "$1" >&2; }
 
 usage() {
-  sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   cat >&2 <<'USAGE'
 
 Examples:
-  ds-worker omo oracle "Review this design for failure modes."
-  ds-worker omo council "Debate whether to split the auth service."
-  ds-worker omo ds-explorer "Find every call site of checkToken in src/."
-  ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
+  ds-worker explorer "Find every call site of checkToken in src/. file:line required."
+  ds-worker reviewer --file test.log "Rank the root-cause candidates for this failure."
   ds-worker critic --file docs/plan/foo.md "Audit this document for factual drift before delivery."
   ds-worker direct --file test.log "Rank the root-cause candidates for this failure."
 
@@ -198,25 +186,6 @@ options:
   --raw               emit the raw NDJSON event stream
   --quiet             suppress the trailer on stderr
 
-omo gateway:
-  ds-worker omo <agent> [options] "<prompt>"
-  agents: oracle | council | librarian | designer | fixer | ds-explorer | ds-reviewer
-  For oracle, council, librarian, designer and fixer the model is left to the
-  active OMO Slim preset (which may select external models), so no --model is
-  passed and no local model autodetect or fallback chain runs — one attempt per
-  call; OMO Slim owns its configured seat/model fallback. --model still pins one
-  model exactly once. Those five built-ins are OpenCode subagents: each dispatches
-  the primary agent 'orchestrator' with a task(subagent_type='<agent>')
-  instruction (council asks for every configured seat and a synthesis; the others
-  ask for the named subagent once). ds-explorer and ds-reviewer keep
-  the configured local model, the fallback chain and the final-report contract.
-  On a host without the OMO Slim preset: if 'orchestrator' is absent but the
-  named agent is installed, the same envelope dispatches through the first
-  visible primary agent in `opencode debug agents` and the result records
-  dispatch="omo-fallback-primary"; if the named agent itself is absent, the
-  call is refused (exit 2, naming it) before any run is spawned.
-  fixer is a potentially WRITING OMO agent: it does not carry the writing
-  'worker' role's git-safety contract.
 USAGE
   exit 2
 }
@@ -224,14 +193,7 @@ USAGE
 [ $# -ge 1 ] || usage
 ROLE="$1"; shift
 
-# Internal requested-agent / dispatch-agent mapping. ROLE stays the public
-# result field; OMO_* drive the final-artifact check, the model choice and the
-# recovery decision.
-OMO_REQUESTED=""    # gateway agent the caller named (empty for legacy roles)
-OMO_CONFIGURED=0    # 1 = the active OMO Slim preset picks the model: no --model
-DS_ROLE=""          # for an omo call: which existing DS contract applies
-CONTRACT_ROLE=""    # role whose final-report contract applies ("" = none)
-DISPATCH="legacy"   # result metadata: legacy ds role or OMO gateway dispatch
+CONTRACT_ROLE=""    # role whose final-report contract applies
 ROLE_HAS_LOCAL_MODEL=1  # 0 = the model is not a local-engine pin: no autodetect
 
 case "$ROLE" in
@@ -239,35 +201,10 @@ case "$ROLE" in
   reviewer) AGENT="ds-reviewer"; MODEL="$DS_MODEL_REVIEWER"; MODEL_FALLBACK="$DS_MODEL_REVIEWER_FALLBACK"; CONTRACT_ROLE="reviewer" ;;
   worker)   AGENT="ds-worker";   MODEL="$DS_MODEL_WORKER";   MODEL_FALLBACK="$DS_MODEL_WORKER_FALLBACK"; CONTRACT_ROLE="worker" ;;
   critic)   AGENT="doc-critic";  MODEL="$DS_MODEL_CRITIC";   MODEL_FALLBACK="";                          CONTRACT_ROLE="critic"; ROLE_HAS_LOCAL_MODEL=0 ;;
-  omo)
-    DISPATCH="omo-configured"
-    # Strict allowlist: an internal mapping, never an arbitrary --agent value.
-    OMO_REQUESTED="${1:-}"
-    case "$OMO_REQUESTED" in
-      # The OMO built-ins are OpenCode subagents: `opencode run --agent <them>`
-      # is rejected, so dispatch the primary 'orchestrator' and ask it for the
-      # named subagent via task(subagent_type=...).
-      oracle|council|librarian|designer|fixer)
-        AGENT="orchestrator"; OMO_CONFIGURED=1 ;;
-      ds-explorer) AGENT="ds-explorer"; DS_ROLE="explorer"; CONTRACT_ROLE="explorer" ;;
-      ds-reviewer) AGENT="ds-reviewer"; DS_ROLE="reviewer"; CONTRACT_ROLE="reviewer" ;;
-      *) die "omo: unsupported agent '${OMO_REQUESTED:-<missing>}' (expected: oracle | council | librarian | designer | fixer | ds-explorer | ds-reviewer)" ;;
-    esac
-    shift
-    if [ "$OMO_CONFIGURED" -eq 1 ]; then
-      # No model to resolve: the OMO Slim preset owns model arrays, variants and
-      # external seats. An empty --model must never reach opencode.
-      MODEL=""; MODEL_FALLBACK=""
-    elif [ "$DS_ROLE" = "explorer" ]; then
-      MODEL="$DS_MODEL_EXPLORER"; MODEL_FALLBACK="$DS_MODEL_EXPLORER_FALLBACK"
-    else
-      MODEL="$DS_MODEL_REVIEWER"; MODEL_FALLBACK="$DS_MODEL_REVIEWER_FALLBACK"
-    fi
-    ;;
   # No OpenCode at all: handled before any opencode check below can refuse it.
   direct) ds_direct_main "$@" ;;
   -h|--help) usage ;;
-  *) die "unknown role '$ROLE' (expected: explorer | reviewer | worker | critic | omo | direct)" ;;
+  *) die "unknown role '$ROLE' (expected: explorer | reviewer | worker | critic | direct)" ;;
 esac
 
 DIR="$PWD"; VARIANT=""; SESSION=""; CONTINUE=0
@@ -302,9 +239,8 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PROMPT" ] || die "no prompt given"
-# The local roles need a model; the critic and OMO built-ins may leave it to
-# their agent or preset.
-if [ -z "$MODEL" ] && [ "$ROLE_HAS_LOCAL_MODEL" -eq 1 ] && [ "$OMO_CONFIGURED" -eq 0 ]; then
+# The local roles need a model; the critic may leave it to OpenCode's default.
+if [ -z "$MODEL" ] && [ "$ROLE_HAS_LOCAL_MODEL" -eq 1 ]; then
   die "no model configured for role '$ROLE': set DS_MODEL=<provider/model> in $DS_CONFIG (install.sh --model does it), or pass --model"
 fi
 command -v opencode >/dev/null || die "opencode not found on PATH"
@@ -345,58 +281,17 @@ for _i in "${!FILES[@]}"; do
 done
 case "$DIR" in
   "$HOME"|/)
-    # The legacy writing worker, plus omo fixer: an OMO subagent that may write.
-    # fixer gets this refusal only — never the worker's git-status retry guard.
-    if [ "$ROLE" = "worker" ] \
-       || { [ "$ROLE" = "omo" ] && [ "$OMO_REQUESTED" = "fixer" ]; }; then
+    if [ "$ROLE" = "worker" ]; then
       die "refusing to run a writing worker with --dir $DIR"
     fi
     ;;
 esac
 
-# OMO gateway honesty on hosts without the OMO Slim preset, before anything is
-# spawned. The allowlist routes the five built-ins through the primary agent
-# 'orchestrator'; check the agent list for what the preset names imply:
-#  - the named agent itself absent (council/designer/fixer where the preset was
-#    never installed) -> refuse with exit 2 naming it, no run, no session;
-#  - only 'orchestrator' absent while the named subagent IS installed -> dispatch
-#    the same task(subagent_type=...) envelope through the first visible primary
-#    from the agent list (list order, as every other role in this script takes
-#    it; the (primary)-only match skips subagent/hidden rows by construction)
-#    and record
-#    dispatch="omo-fallback-primary" so the result is honest about which agent's
-#    model answered. With the preset installed both checks pass and the behavior
-#    is exactly the orchestrator dispatch described above.
-if [ "$ROLE" = omo ] && [ "$OMO_CONFIGURED" -eq 1 ]; then
-  OMO_AGENT_LIST="$(oc_agent_list)" \
-    || die "could not read the agent list ('opencode debug agents' returned no JSON array)"
-  if ! printf '%s\n' "$OMO_AGENT_LIST" | grep -qE "^${OMO_REQUESTED} \((primary|subagent|all)\)$"; then
-    die "agent '${OMO_REQUESTED}' not installed — OMO Slim preset not installed on this host; see references/portability.md"
-  fi
-  if ! printf '%s\n' "$OMO_AGENT_LIST" | grep -qE '^orchestrator \((primary|subagent|all)\)$'; then
-    # First visible primary in list order, name = the line minus its mode
-    # suffix (primary names may contain spaces). List order is the established
-    # "first primary" pick: the legacy roles below already rely on unsorted
-    # agent-list order. Do NOT sort: an alphabetical sort can pick
-    # a preset agent bound to an external seat, which would silently spend
-    # tokens this wrapper has no authority over.
-    OMO_FALLBACK_PRIMARY="$(printf '%s\n' "$OMO_AGENT_LIST" \
-      | awk '/[^[:space:]].* \(primary\)$/ { sub(/ \(primary\)$/, ""); print; exit }')"
-    [ -n "$OMO_FALLBACK_PRIMARY" ] \
-      || die "OMO Slim 'orchestrator' is not installed and 'opencode debug agents' shows no visible primary agent — cannot dispatch '${OMO_REQUESTED}'"
-    note "OMO Slim 'orchestrator' absent — ran via fallback primary ${OMO_FALLBACK_PRIMARY}; results reflect that agent's model, not OMO's"
-    AGENT="$OMO_FALLBACK_PRIMARY"
-    DISPATCH="omo-fallback-primary"
-  fi
-fi
-
 # OpenCode v1 `run --agent <unknown>` did NOT fail — it warned on stderr and ran
 # the default agent, which has no permission restrictions; same for a
 # `mode: subagent` agent. v2 rejects an unknown agent with an error event, but
 # the sandbox is too important to rest on one version's behavior, so check up
-# front and again after the run. An OMO built-in is expected to be mode=subagent and is never
-# passed to `opencode run --agent` directly: the check below covers the dispatch
-# agent (orchestrator for the OMO built-ins), which must not be a subagent.
+# front and again after the run.
 AGENT_LIST="$(oc_agent_list)" \
   || die "could not read the agent list ('opencode debug agents' returned no JSON array)"
 AGENT_LINE="$(printf '%s\n' "$AGENT_LIST" | grep "^${AGENT} " || true)"
@@ -466,11 +361,9 @@ ds_stop_progress_monitor() {
 }
 
 ds_is_read_only_role() {
-  # Only roles whose report contract AND safety are known: explorer, reviewer,
-  # and the DS roles reached through the omo gateway. Never an OMO-configured
-  # agent (a full Council dispatch must not be recovered automatically).
+  # Only roles whose report contract AND safety are known.
   case "$CONTRACT_ROLE" in
-    explorer|reviewer|critic) [ "$OMO_CONFIGURED" -eq 0 ] ;;
+    explorer|reviewer|critic) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -511,8 +404,7 @@ ds_has_required_final_artifact() {
       printf '%s\n' "$text" | grep -Eq '^VERDICT:[[:space:]]*(PASS|FIX_NEEDED)[[:space:]]*$' || return 1
       ;;
     *)
-      # No ds-worker contract for this agent (the OMO-configured OMO agents):
-      # any text the run produced counts as its result.
+      # No report contract: any text the run produced counts as its result.
       [ -n "$text" ] || return 1
       ;;
   esac
@@ -523,7 +415,7 @@ ds_build_result() {
   local raw_path="$1" child_rc="$2" timeout_reason="$3" phase="$4" stderr_path="$5"
   local idle_timeout="$6" max_runtime="$7"
   local base text tool_count has_final=0 outcome status model_json
-  # An OMO-configured call has no model of ours to report: null, not "".
+  # A critic call with no DS_MODEL_CRITIC has no model of ours to report: null.
   if [ -n "$MODEL" ]; then
     model_json="$(jq -n --arg model "$MODEL" '$model')"
   else
@@ -531,14 +423,13 @@ ds_build_result() {
   fi
 
   base="$(jq -R 'fromjson? // empty' <"$raw_path" | jq -s \
-    --arg role "$ROLE" --arg agent "$AGENT" --arg dispatch "$DISPATCH" --arg dir "$DIR" --arg raw "$raw_path" \
+    --arg role "$ROLE" --arg agent "$AGENT" --arg dir "$DIR" --arg raw "$raw_path" \
     --arg stderr "$stderr_path" --arg timeout_reason "$timeout_reason" --arg phase "$phase" \
     --argjson model "$model_json" \
     --argjson rc "$child_rc" --arg idle_timeout "$idle_timeout" --arg max_runtime "$max_runtime" '
     {
       role: $role,
       agent: $agent,
-      dispatch: $dispatch,
       model: $model,
       dir: $dir,
       exit: $rc,
@@ -651,27 +542,22 @@ ds_resolve_served_model() {
 }
 
 # --model pins one model on purpose, so autodetect must not second-guess it.
-# An OMO-configured call has no model of ours at all: the preset chooses.
-# The critic role has no local-engine pin either (empty = the doc-critic agent
-# config owns the model; a set DS_MODEL_CRITIC is an explicit external pin):
+# The critic role has no local-engine pin either (empty = OpenCode's default
+# model; a set DS_MODEL_CRITIC is an explicit cross-model pin):
 # probing "which local model is loaded" for it would either rewrite the
 # cross-model binding to the local engine or die on a provider with no baseURL.
-if [ "$EXPLICIT_MODEL" -eq 0 ] && [ "$OMO_CONFIGURED" -eq 0 ] \
+if [ "$EXPLICIT_MODEL" -eq 0 ] \
    && [ "$ROLE_HAS_LOCAL_MODEL" -eq 1 ] && [ "$DS_MODEL_AUTODETECT" = "1" ]; then
   ds_resolve_served_model
 fi
 
 # ---- model chain --------------------------------------------------------------
-# --model given explicitly: run exactly that model, once, no fallback chain.
-# An OMO-configured call: one attempt with no --model; OMO Slim owns its
-# configured seat/model fallback, so never retry a full Council blindly.
-# Otherwise: the role's primary model up to DS_MODEL_RETRIES times, then its
+# --model given explicitly (or the critic role): run exactly that model, once,
+# no fallback chain. Otherwise: the role's primary model up to DS_MODEL_RETRIES times, then its
 # fallback model up to DS_MODEL_RETRIES times if one is configured (by default
 # none is, so the chain is primary-only). Stops at the first success.
 if [ "$EXPLICIT_MODEL" -eq 1 ] || [ "$ROLE" = critic ]; then
   MODEL_CHAIN=("$MODEL")
-elif [ "$OMO_CONFIGURED" -eq 1 ]; then
-  MODEL_CHAIN=("")
 else
   MODEL_CHAIN=()
   for _i in $(seq 1 "$DS_MODEL_RETRIES"); do MODEL_CHAIN+=("$MODEL"); done
@@ -688,39 +574,10 @@ ${PROMPT}
 Report using your required output format. If you cannot establish something,
 say so explicitly rather than filling the gap with a plausible guess."
 
-# The OMO built-ins are subagents: dispatch the orchestrator and ask it for the
-# real OMO Slim task, so the seats and models come from the preset. council
-# collects every configured seat and synthesizes; the others run one subagent.
-if [ "$ROLE" = omo ] && [ "$OMO_CONFIGURED" -eq 1 ]; then
-  if [ "$OMO_REQUESTED" = council ]; then
-    ENVELOPE="[supervisor task | role=${ROLE} | agent=council | cwd=${DIR}]
-
-${PROMPT}
-
-Dispatch this through the OMO Slim Council now: task(subagent_type='council'),
-so every configured council seat answers, then synthesize their answers into
-one result. Do not answer from a single seat.
-
-Report using your required output format. If you cannot establish something,
-say so explicitly rather than filling the gap with a plausible guess."
-  else
-    ENVELOPE="[supervisor task | role=${ROLE} | agent=${OMO_REQUESTED} | cwd=${DIR}]
-
-${PROMPT}
-
-Dispatch this through OMO Slim now: task(subagent_type='${OMO_REQUESTED}'),
-requesting that one subagent, and return its result. Do not answer yourself and
-do not gather multiple seats.
-
-Report using your required output format. If you cannot establish something,
-say so explicitly rather than filling the gap with a plausible guess."
-  fi
-fi
-
 # Advisory only: a read-only run should spend its agentic-step ceiling on the
 # highest-value evidence and still emit a report. Nothing here parses or enforces
-# a step count, and the notice must never reach a writing role, an OMO-configured
-# built-in, or the recovery prompt.
+# a step count, and the notice must never reach a writing role or the recovery
+# prompt.
 if ds_is_read_only_role; then
   ENVELOPE="$ENVELOPE
 
@@ -748,7 +605,8 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
   RAW="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.ndjson"
   ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.stderr"
 
-  # Never pass an empty --model: an OMO-configured call lets the preset choose.
+  # Never pass an empty --model: a critic with no DS_MODEL_CRITIC lets OpenCode
+  # choose.
   # No --server means a private --standalone server: v2's default is the
   # managed background service, whose reach to a LAN model server depends on where
   # it was last started (it has failed with EHOSTUNREACH).

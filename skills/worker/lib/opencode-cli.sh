@@ -27,7 +27,7 @@ oc_agent_list() {
 }
 
 # v2 folds the reasoning variant into the model reference: provider/model#variant.
-# $1 = model (may be empty: an OMO preset picks it), $2 = variant (may be empty).
+# $1 = model (may be empty: OpenCode's default model answers), $2 = variant (may be empty).
 oc_model_ref() {
   if [ -n "$2" ] && [ -n "$1" ]; then
     printf '%s#%s' "$1" "$2"
