@@ -1,5 +1,7 @@
-# OS junk
+# OS and editor junk
 .DS_Store
+*.swp
+*~
 
 # IDE / assistant local config
 .idea/
@@ -7,6 +9,7 @@
 *.iml
 .serena/
 .claude/
+.opencode/
 
 # local-only overrides and secrets (never commit)
 *.local
@@ -15,9 +18,10 @@
 !*.env.example
 config.local
 
-# ds-worker runtime state (backend normally lives under ${TMPDIR:-/tmp})
+# ds-worker runtime state, if DS_STATE_DIR points inside the checkout
+# (the default is ~/.local/state/ds-worker)
 .ds-worker/
 *.log
 
-# local working notes (plans, measurements) — never published
-docs/
+# local working notes (plans, measurements) at the top level — never published
+/docs/
