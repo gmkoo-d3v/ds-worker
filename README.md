@@ -1,5 +1,7 @@
 # worker
 
+**English** · [한국어](README.ko.md)
+
 A skill that keeps Claude or Codex in the **supervisor** seat and hands wide,
 repetitive work to a model you choose — a local model server or any hosted API
 OpenCode can reach — running as sandboxed OpenCode agents. The command is
@@ -256,3 +258,7 @@ The resident backend restarts itself when the agent-file fingerprint changes.
 `~/.local/state/ds-worker/runs/<timestamp>-<role>.ndjson` — the raw event stream
 and matching `.stderr` file for every call. A recovery, when attempted, gets
 separate `-recovery.ndjson` and `-recovery.stderr` files.
+
+## License
+
+[MIT](LICENSE)

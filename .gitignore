@@ -15,3 +15,6 @@ config.local
 # ds-worker runtime state (backend normally lives under ${TMPDIR:-/tmp})
 .ds-worker/
 *.log
+
+# local working notes (plans, measurements) — never published
+docs/
