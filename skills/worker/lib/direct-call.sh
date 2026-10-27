@@ -1,4 +1,4 @@
-# ds-worker direct — one chat completion against the GX10 endpoint, no OpenCode.
+# ds-worker direct — one chat completion against the model endpoint, no OpenCode.
 #
 #   ds-worker direct [--model <prov/mdl>] [--file <path>]... [--max-runtime <s>]
 #                    [--json] [--quiet] "<prompt>"
@@ -7,6 +7,9 @@
 # has no tools, no permissions and no session. Use it for work that only needs
 # judgment over supplied material (a log, a diff, a document). Anything that
 # has to search or edit the repository still needs the OpenCode roles.
+# Any OpenAI-compatible endpoint works: DS_MODEL_ENDPOINT, else the provider's
+# baseURL in opencode.jsonc; an API key comes from the environment variable
+# that DS_MODEL_API_KEY_ENV names.
 #
 # Sourced by ds-worker after its config and defaults are loaded; needs die,
 # note and lib/model-endpoint.sh. It never calls opencode, so it keeps working
@@ -15,7 +18,7 @@
 DS_DIRECT_SYSTEM="You are a read-only analyst working for a supervisor. You have no tools: you cannot open files, run commands or browse. Everything you may rely on is in the user message, including any attached files. Quote file paths and lines exactly as given. If the material does not establish something, say so explicitly instead of guessing."
 
 ds_direct_usage() {
-  sed -n '2,10p' "$SELF_DIR/../lib/direct-call.sh" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,13p' "$SELF_DIR/../lib/direct-call.sh" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -48,6 +51,7 @@ ds_direct_main() {
     esac
   done
   [ -n "$prompt" ] || die "no prompt given"
+  [ -n "$model" ] || die "direct: no model configured: set DS_MODEL=<provider/model> in $DS_CONFIG, or pass --model"
   command -v curl >/dev/null || die "curl not found on PATH"
   command -v jq >/dev/null || die "jq not found on PATH"
   case "$max_runtime" in ''|*[!0-9]*|0) die "--max-runtime must be a positive integer (seconds)" ;; esac
@@ -66,9 +70,9 @@ ds_direct_main() {
   [ -n "$endpoint" ] \
     || die "direct: no endpoint — set DS_MODEL_ENDPOINT or a baseURL for provider '$provider' in opencode.jsonc"
   # Same rule as the OpenCode roles: --model is a deliberate pin, otherwise
-  # use whatever the box has loaded. No catalog check — no OpenCode here.
+  # follow a server that serves one model. No catalog check — no OpenCode here.
   if [ "$explicit" -eq 0 ] && [ "$DS_MODEL_AUTODETECT" = "1" ]; then
-    if detected="$(ds_detect_served_model "$endpoint")" && [ -n "$detected" ] \
+    if detected="$(ds_detect_served_model "$endpoint" "$model_id")" && [ -n "$detected" ] \
        && [ "$detected" != "$model_id" ]; then
       note "autodetect: $model is not loaded; $endpoint serves $detected — using $provider/$detected"
       model_id="$detected"; model="$provider/$detected"
@@ -76,7 +80,9 @@ ds_direct_main() {
   fi
 
   mkdir -p "$DS_STATE_DIR/runs"
-  local stamp request raw user_msg http rc=0
+  local stamp request raw user_msg http auth rc=0
+  auth="$(ds_model_auth_config)" \
+    || die "direct: DS_MODEL_API_KEY_ENV names '${DS_MODEL_API_KEY_ENV}', but that variable is unset or not a valid name"
   stamp="$(date +%Y%m%d-%H%M%S)-$$"
   request="$DS_STATE_DIR/runs/${stamp}-direct.request.json"
   raw="$DS_STATE_DIR/runs/${stamp}-direct.json"
@@ -89,7 +95,7 @@ ${prompt}"
      messages: [{role: "system", content: $system}, {role: "user", content: $user}]}' >"$request"
 
   [ "$quiet" -eq 1 ] || note "direct model=$model endpoint=$endpoint raw_log=$raw"
-  http="$(curl -sS -m "$max_runtime" -o "$raw" -w '%{http_code}' \
+  http="$(printf '%s' "$auth" | curl -sS -m "$max_runtime" -o "$raw" -w '%{http_code}' -K - \
     -H 'Content-Type: application/json' --data-binary @"$request" \
     "${endpoint%/}/chat/completions" 2>"$raw.stderr")" || rc=$?
   [ -f "$raw" ] || : >"$raw"

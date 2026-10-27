@@ -1,9 +1,13 @@
 ---
-description: GX10 DeepSeek/Qwen implementer for tightly specified changes. Edits files and runs verification commands, then reports what it actually ran and what the output actually was. Does not expand scope.
+description: Implementer for tightly specified changes (ds = delegated subagent). Edits files and runs verification commands, then reports what it actually ran and what the output actually was. Does not expand scope.
 mode: all
-model: gx10/qwen3.8-flash-next
 temperature: 0.1
 permission:
+  # Default-deny first: OpenCode v2 starts every agent from `"*": allow`, so a
+  # tool nobody named (the code-mode `execute` tool and what it exposes, such
+  # as worktree_create, session_move and remote MCP servers) would otherwise be
+  # granted. Everything below is allowed back by name.
+  "*": deny
   edit: allow
   bash: allow
   read: allow

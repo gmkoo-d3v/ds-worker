@@ -1,12 +1,12 @@
 ---
 name: worker
-description: Use when delegating work to the local GX10 DeepSeek/Qwen models via OpenCode headless - codebase exploration, repeated searches, implementation-candidate research, test log analysis, or tightly specified implementation. Establishes the supervisor role - you decompose, decide and verify; the ds-worker command executes. Triggers on "ds-worker", "delegate to DeepSeek", "delegate to Qwen", "supervisor mode", "hand the search off".
+description: Use when delegating work to a configured worker model (a local model server or a hosted API) via OpenCode headless - codebase exploration, repeated searches, implementation-candidate research, test log analysis, or tightly specified implementation. Establishes the supervisor role - you decompose, decide and verify; the ds-worker command (ds = delegated subagent) executes. Triggers on "ds-worker", "delegate to the local model", "delegate to the worker", "supervisor mode", "hand the search off".
 ---
 
 # worker
 
-You are the **supervisor**. A GX10 worker (local DeepSeek, falling back to
-local Qwen) is your hands, not your judgment.
+You are the **supervisor**. The worker — whatever model `DS_MODEL` names, local
+or hosted — is your hands, not your judgment. *ds* = delegated subagent.
 
 ## You do this yourself (never delegate)
 
@@ -26,8 +26,8 @@ Never ask a worker "how should we do this?" Decide first, then hand over executi
 | Implementation candidates | `explorer` | Gathering options. Choosing is yours |
 | Test log analysis | `reviewer` | Pulling signal out of long output |
 | Tightly specified implementation | `worker` | Only what you have already designed |
-| Document audit before delivery | `critic` | The doc-critic persona — cross-model judge (agent-bound model, not the local engine) |
-| Judgment over material you hand it | `direct` | One chat completion straight to GX10 — no OpenCode, no tools |
+| Document audit before delivery | `critic` | The doc-critic persona — cross-model judge on `DS_MODEL_CRITIC` |
+| Judgment over material you hand it | `direct` | One chat completion straight to the model endpoint — no OpenCode, no tools |
 
 **Never delegate**: vague tasks, implementation whose design is unsettled, changes
 that are hard to undo, anything you will say to the user, commits, pushes, PRs.
@@ -52,18 +52,19 @@ ds-worker critic --file docs/plan/foo.md "Audit this document for factual drift 
 ds-worker direct --file test.log "Rank the root-cause candidates for this failure."
 ```
 
-`explorer` / `reviewer` / `worker` run on the local GX10 engine. `critic` is the
-fourth persona and the one exception: it dispatches the global `doc-critic`
-agent (`~/.config/opencode/agent/doc-critic.md`), whose own frontmatter binds a
-different-model provider — that cross-model binding is the point of the role, so
-the wrapper passes no `--model` and no local autodetect for it. Required final
+`explorer` / `reviewer` / `worker` run on `DS_MODEL` (or their per-role
+override). `critic` is the fourth persona: it dispatches the global `doc-critic`
+agent (`~/.config/opencode/agent/doc-critic.md`) on `DS_MODEL_CRITIC` — a model
+other than `DS_MODEL` is the point of the role; left empty, OpenCode's default
+model answers. No autodetect and no fallback chain apply to it. Required final
 artifact: a `VERDICT:` line. Pass the document with `--file` or an exact path in
 the prompt; critic reads only what you hand it.
 
 `direct` skips OpenCode entirely: it sends one OpenAI-style chat completion to
-the GX10 endpoint (`DS_MODEL_ENDPOINT`, else the provider's `baseURL` in
-`opencode.jsonc`) with the `--file` contents inlined, and follows the loaded
-model like the other roles. The model has **no tools** — it cannot open a path
+the model endpoint (`DS_MODEL_ENDPOINT`, else the provider's `baseURL` in
+`opencode.jsonc`; an API key from the variable `DS_MODEL_API_KEY_ENV` names)
+with the `--file` contents inlined, and follows a single-model server like the
+other roles. The model has **no tools** — it cannot open a path
 you only name, search, or edit — and there are no agent permissions or
 sessions; `--dir`, `--session` and similar options are refused. Use it for
 logs, diffs and documents you can hand over whole, and as the path that keeps
@@ -74,11 +75,9 @@ under `$DS_STATE_DIR/runs/`.
 
 ## Persona files and sync
 
-The Mac copy keeps the `gx10` provider; linux-host uses `local-vllm`.
-Both bind `doc-critic` to `openai/gpt-6.1-sol`. Absence from the OpenCode
-model list does not establish that a model is uncallable: preserve the binding
-and report inference as unverified until an actual call establishes the result.
-See [portability](references/portability.md).
+The personas carry no `model:` line: the model comes from the config file and
+travels as `--model`, so one set of persona files works with any provider. See
+[portability](references/portability.md).
 
 All four persona definitions are owned by this skill's `agents/` folder — the
 supervisor's management point. OpenCode loads copies from
@@ -91,9 +90,9 @@ sync-agents               # drift check only (exit 1 on difference)
 ```
 
 `sync-agents --backfill` reverses the direction (adopt a newer live file once).
-The agent frontmatter supplies the critic model by default. Optional
-`DS_MODEL_CRITIC` pins the ds-worker path; keep it equal to the frontmatter
-binding when set. `ds-doctor` checks the configured binding for drift.
+Every persona's permissions start with `"*": deny`: OpenCode v2 grants any tool
+nobody named (the code-mode `execute` tool among them), so the personas allow
+back only what each role needs. Keep that line first when you edit them.
 
 Main options: `--dir` working directory · `--model` override · `--session <id>` continue
 a session · `--file` attach a file · `--json` structured output · `--idle-timeout <sec>`
@@ -107,14 +106,19 @@ Defaults (models per role, stream idle timeout, max runtime, backend) live in
 An environment variable still wins for a single call:
 
 ```bash
-DS_MODEL_REVIEWER=gx10/qwen3.8-flash-next ds-worker reviewer --file test.log "..."
+DS_MODEL_REVIEWER=<provider/model> ds-worker reviewer --file test.log "..."
 ```
 
-The GX10 box serves one model at a time, so ds-worker asks the endpoint which
-model is actually loaded and uses that — load Qwen instead of DeepSeek on
-`:8000` and calls follow it with no config change. It redirects only to a model
-present in the provider's catalog in `opencode.jsonc`; otherwise it keeps the
-configured pin and says why. Set `DS_MODEL_AUTODETECT=0` to disable.
+With no `DS_MODEL` the local roles refuse to run and say how to set it
+(`install.sh --model <provider/model>`).
+
+A local server that serves one model at a time makes a pinned name stale when
+another is loaded, so ds-worker asks the endpoint which models it serves and
+follows it only when that is one model (a single entry, or aliases sharing one
+`root`; a configured alias is kept). It redirects only to a model present
+in the provider's catalog in `opencode.jsonc`; otherwise — and always for a
+hosted API listing many — it keeps the configured pin and says why. Set
+`DS_MODEL_AUTODETECT=0` to disable.
 
 Every OpenCode role is started inside `--dir` (OpenCode v2 has no `run --dir`;
 a v2 server uses the client's cwd). By default each call runs
@@ -126,7 +130,7 @@ password in `$DS_STATE_DIR/serve.password` (0600) unless
 `OPENCODE_SERVER_PASSWORD` is set, and ds-worker passes it as
 `OPENCODE_PASSWORD`, never on argv. Read-only recovery always runs
 `--standalone`, because its tools-off override cannot reach a running server.
-v2's own managed `opencode service` is not used. Whether it can reach the GX10
+v2's own managed `opencode service` is not used. Whether it can reach a LAN model
 box depends on where it was last started. See
 [references/opencode-cli.md](references/opencode-cli.md).
 
@@ -161,7 +165,7 @@ OpenCode's provider options have two separate protections:
   per-token timeout, and it must not watch only `delta.content`.
 - `timeout` is the provider request's absolute wall-clock limit.
 
-For a local provider (DeepSeek or Qwen), configure those options in OpenCode's
+For a local provider, configure those options in OpenCode's
 provider configuration.
 The worker wrapper adds a second boundary:
 
@@ -204,7 +208,7 @@ fails" below.
 For `explorer`, `reviewer` (including the `ds-explorer` and `ds-reviewer`
 gateway aliases) and `critic`, if a session id exists but the required final report is
 missing, the wrapper owns **one** read-only recovery continuation on the same
-session. That continuation disables tools and Qwen thinking and reports only the
+session. That continuation disables tools and model thinking and reports only the
 evidence the session already produced — it never searches again. `recovered`,
 `initial_outcome`, `initial_exit`, and `initial_timeout_reason` make that first
 attempt visible. Set `DS_AUTO_RECOVER_READONLY=0` to disable it. Progress
@@ -240,7 +244,7 @@ A worker's output never exceeds the quality of its instruction. Every call:
 
 ## Never treat the result as fact
 
-GX10 worker output (DeepSeek or Qwen, whichever answered) is a **claim**, not a
+Worker output (whichever model answered) is a **claim**, not a
 fact. Required:
 
 - Every `file:line` from `explorer` — **read it yourself before quoting it.** Line
@@ -271,13 +275,16 @@ fact. Required:
   failing line names the CLI change. Meanwhile `ds-worker direct` still works
   for material you can hand over.
 - `provider.transport` / `EHOSTUNREACH` in the result's `errors` → the OpenCode
-  process cannot reach the GX10 box. Compare with
+  process cannot reach the model server. Compare with
   `ds-doctor` (it curls the endpoint) from the same shell.
 - **exit 3 (`ran the UNRESTRICTED default agent`)** → the sandbox was not applied.
   Discard the result. Re-run `sync-agents --install`, then delegate again
-- `bin/ds-worker-rr` → round-robin candidate list lives in that script's `MODELS` array
-  (current aliases: gx10/qwen3.8-flash-next, gx10/gx10-compact); it honors
+- `bin/ds-worker-rr` → rotates `--model` over `DS_RR_MODELS` (space-separated,
+  environment or config file); fewer than two = plain `ds-worker`. It honors
   `DS_STATE_DIR`/`XDG_STATE_HOME` for its rotation counter.
+- `no model configured` → set `DS_MODEL=<provider/model>` in
+  `~/.config/ds-worker/config` (`install.sh --model` does it); `opencode models`
+  lists what OpenCode can reach.
 - `no text output` → the run may have finished and been billed while the event
   stream dropped the final message. **The work is usually still in the session.**
   Recover it — this costs almost nothing, since the model answers from context:

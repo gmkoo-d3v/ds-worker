@@ -16,6 +16,8 @@
 #   8  partial-mode            --partial skips the conflict, installs the rest
 #   9  config-no-overwrite     an existing host config is never overwritten
 #   10 sync-agents-conflict    sync-agents refuses a divergent file, then syncs
+#   11 model-settings          --model/--critic-model replace their line in
+#                              place; an invalid --model changes nothing
 #
 # Style: plain bash asserts, no colors; failure dumps the captured output.
 set -u
@@ -66,7 +68,7 @@ chmod +x "$SHIM/opencode"
 export PATH="$SHIM:$PATH"
 
 # install.sh's dependency preflight needs these from the real PATH.
-for tool in jq curl git; do
+for tool in jq curl git perl; do
   command -v "$tool" >/dev/null 2>&1 || {
     printf 'install-fixture: required tool %s missing from PATH — cannot run\n' "$tool" >&2
     exit 2
@@ -115,7 +117,7 @@ BIN_TOOLS="ds-doctor ds-serve ds-worker ds-worker-rr sync-agents"
 AGENT_FILES="doc-critic.md ds-explorer.md ds-reviewer.md ds-worker.md"
 
 # ── 1. fresh-install ────────────────────────────────────────────────────────
-run_install
+run_install --model local/test-model
 [ "$RC" -eq 0 ] || sfail "exit $RC (expected 0)"
 for t in $BIN_TOOLS; do
   [ -L "$BIN_DIR/$t" ] || sfail "bin/$t not a symlink"
@@ -128,6 +130,8 @@ done
 [ -f "$CONFIG_FILE" ] || sfail "config not created"
 [ -f "$LEDGER" ] || sfail "ledger not written"
 grep -q "SUMMARY" "$OUT" || sfail "no SUMMARY lines"
+[ "$(grep -c '^DS_MODEL=' "$CONFIG_FILE")" = 1 ] && grep -qx 'DS_MODEL=local/test-model' "$CONFIG_FILE" \
+  || sfail "--model did not write exactly one DS_MODEL=local/test-model line"
 finish "fresh-install"
 
 # ── 2. verify-clean ─────────────────────────────────────────────────────────
@@ -248,6 +252,21 @@ run_sync
 grep -q "in sync" "$OUT" || sfail "sync-agents check does not report 'in sync'"
 [ "$(backups_count)" -eq "$BAK_BEFORE" ] || sfail "backups accumulated during scenario 10"
 finish "sync-agents-conflict"
+
+# ── 11. model-settings ──────────────────────────────────────────────────────
+# --model / --critic-model replace their one line; the rest of the file stays.
+printf 'DS_IDLE_TIMEOUT=77\n' >>"$CONFIG_FILE"
+run_install --model local/other-model --critic-model local/judge-model
+[ "$RC" -eq 0 ] || sfail "exit $RC (expected 0)"
+[ "$(grep -c '^DS_MODEL=' "$CONFIG_FILE")" = 1 ] && grep -qx 'DS_MODEL=local/other-model' "$CONFIG_FILE" \
+  || sfail "DS_MODEL was not replaced in place"
+grep -qx 'DS_MODEL_CRITIC=local/judge-model' "$CONFIG_FILE" || sfail "DS_MODEL_CRITIC not written"
+grep -qx 'DS_IDLE_TIMEOUT=77' "$CONFIG_FILE" || sfail "an unrelated setting was lost"
+CFG_BEFORE="$(shasum -a 256 <"$CONFIG_FILE")"
+run_install --model not-a-model-ref
+[ "$RC" -eq 2 ] || sfail "invalid --model exit $RC (expected 2)"
+[ "$(shasum -a 256 <"$CONFIG_FILE")" = "$CFG_BEFORE" ] || sfail "invalid --model changed the config"
+finish "model-settings"
 
 if [ "$FAILED" -eq 0 ]; then
   printf '# install-fixture: ALL SCENARIOS PASS\n'

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ds-worker picks the model that is actually loaded on the endpoint.
-# The GX10 box serves one model at a time, so a configured primary goes stale
+# A local server serves one model at a time, so a configured primary goes stale
 # the moment a different one is loaded; these cover the four resolution paths.
 set -euo pipefail
 
@@ -25,7 +25,7 @@ cat > "$FAKE_BIN/opencode" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
-  models) printf 'gx10/deepseek-v4-flash-exl3-cross\ngx10/qwen3.8-27b\n'; exit 0 ;;
+  models) printf 'local/model-a\nlocal/model-b\n'; exit 0 ;;
   debug)  printf '[{"name":"ds-explorer","mode":"all"},{"name":"ds-worker","mode":"all"}]\n'; exit 0 ;;
   run)    ;;
   *)      exit 0 ;;
@@ -47,7 +47,7 @@ run_case() {   # $1 = served model id ("" = endpoint down); rest = extra ds-work
   DS_STATE_DIR="$TEST_ROOT/state" \
   DS_SERVE=off \
   DS_MODEL_ENDPOINT="http://stub.invalid:8000/v1" \
-  DS_MODEL_EXPLORER="gx10/deepseek-v4-flash-exl3-cross" \
+  DS_MODEL_EXPLORER="local/model-a" \
   DS_MODEL_EXPLORER_FALLBACK="" \
   DS_MODEL_RETRIES=1 \
   DS_IDLE_TIMEOUT=0 \
@@ -57,22 +57,22 @@ run_case() {   # $1 = served model id ("" = endpoint down); rest = extra ds-work
 fail() { printf '%s: FAIL — %s\n' "$1" "$2" >&2; exit 1; }
 
 # 1. A different model is loaded → ds-worker follows it.
-out="$(run_case "qwen3.8-27b")"
-grep -q 'used gx10/qwen3.8-27b' <<<"$out" \
-  || fail "follows the loaded model" "expected the run to use gx10/qwen3.8-27b; got: $out"
+out="$(run_case "model-b")"
+grep -q 'used local/model-b' <<<"$out" \
+  || fail "follows the loaded model" "expected the run to use local/model-b; got: $out"
 echo "ds-worker autodetect follows the loaded model: PASS"
 
 # 2. The configured model is the loaded one → left alone, no noise.
-out="$(run_case "deepseek-v4-flash-exl3-cross")"
-grep -q 'used gx10/deepseek-v4-flash-exl3-cross' <<<"$out" \
-  || fail "keeps a matching model" "expected gx10/deepseek-v4-flash-exl3-cross; got: $out"
+out="$(run_case "model-a")"
+grep -q 'used local/model-a' <<<"$out" \
+  || fail "keeps a matching model" "expected local/model-a; got: $out"
 grep -q 'autodetect:' <<<"$out" \
   && fail "keeps a matching model" "should not narrate when nothing changed; got: $out"
 echo "ds-worker autodetect stays quiet when already correct: PASS"
 
 # 3. Endpoint unreachable → keep the configured model, say why.
 out="$(run_case "")"
-grep -q 'used gx10/deepseek-v4-flash-exl3-cross' <<<"$out" \
+grep -q 'used local/model-a' <<<"$out" \
   || fail "endpoint down" "expected the configured model; got: $out"
 grep -q 'autodetect: .*unreachable' <<<"$out" \
   || fail "endpoint down" "expected an unreachable note; got: $out"
@@ -80,14 +80,23 @@ echo "ds-worker autodetect falls back to config when the endpoint is down: PASS"
 
 # 4. Loaded model is absent from the catalog → cannot be routed, so keep and warn.
 out="$(run_case "some-unlisted-model")"
-grep -q 'used gx10/deepseek-v4-flash-exl3-cross' <<<"$out" \
+grep -q 'used local/model-a' <<<"$out" \
   || fail "uncatalogued model" "expected the configured model; got: $out"
-grep -q "absent from the 'gx10' catalog" <<<"$out" \
+grep -q "absent from the 'local' catalog" <<<"$out" \
   || fail "uncatalogued model" "expected a catalog warning; got: $out"
 echo "ds-worker autodetect warns on a model missing from opencode.jsonc: PASS"
 
 # 5. --model pins a choice on purpose; autodetect must not override it.
-out="$(run_case "qwen3.8-27b" --model gx10/deepseek-v4-flash-exl3-cross)"
-grep -q 'used gx10/deepseek-v4-flash-exl3-cross' <<<"$out" \
+out="$(run_case "model-b" --model local/model-a)"
+grep -q 'used local/model-a' <<<"$out" \
   || fail "--model wins" "expected --model to win over autodetect; got: $out"
 echo "ds-worker autodetect defers to an explicit --model: PASS"
+
+# A key variable that DS_MODEL_API_KEY_ENV names but nobody set: say so, send
+# nothing, keep the pin — never report it as an unreachable endpoint.
+out="$(DS_MODEL_API_KEY_ENV=DS_TEST_UNSET_KEY run_case "model-b")"
+grep -q 'used local/model-a' <<<"$out" \
+  && grep -q "DS_MODEL_API_KEY_ENV names 'DS_TEST_UNSET_KEY'" <<<"$out" \
+  && ! grep -q 'unreachable' <<<"$out" \
+  || fail "missing key variable" "expected the pin kept with a key-variable note; got: $out"
+echo "ds-worker autodetect names a missing API key variable instead of blaming the endpoint: PASS"

@@ -76,7 +76,7 @@ EOF
 chmod +x "$FAKE_BIN/opencode"
 
 export PATH="$FAKE_BIN:$PATH"
-# Not an autodetect test: never probe the real GX10 endpoint from opencode.jsonc.
+# Not an autodetect test: never probe the real model endpoint from opencode.jsonc.
 export DS_MODEL_AUTODETECT=0
 export DS_STATE_DIR="$STATE_DIR"
 export DS_TEST_ENV_CAPTURE_DIR="$ENV_CAPTURE_DIR"

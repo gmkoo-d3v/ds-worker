@@ -1,8 +1,9 @@
-# superviser
+# worker
 
-A skill that keeps Claude/Codex in the **supervisor** seat and hands wide,
-repetitive work to a local GX10 worker (DeepSeek, falling back to Qwen)
-running on OpenCode headless.
+A skill that keeps Claude or Codex in the **supervisor** seat and hands wide,
+repetitive work to a model you choose — a local model server or any hosted API
+OpenCode can reach — running as sandboxed OpenCode agents. The command is
+`ds-worker`; *ds* stands for **delegated subagent**.
 
 ```
         ┌──────────────────────────┐
@@ -13,35 +14,52 @@ running on OpenCode headless.
         ┌────────────▼─────────────┐
         │ opencode run --standalone│  OpenCode v2: private server per call
         │   (or --server: ds-serve)│  DS_SERVE=auto, password-protected
-        │ (+ OmO Slim, optional)  │
-        └────────────┬────────────┘
-                     │ --agent [--model]
+        │ (+ OmO Slim, optional)   │
+        └────────────┬─────────────┘
+                     │ --agent --model $DS_MODEL
        ┌─────────────┼─────────────┐
        ▼             ▼             ▼
   ds-explorer   ds-worker    ds-reviewer
    read-only     can write    read-only
-   DeepSeek→Qwen DeepSeek→Qwen DeepSeek→Qwen
                      │
                      ▼
-              omo <agent> gateway
-              OMO Slim preset / Council
+              omo <agent> gateway          ds-worker direct
+              OMO Slim preset / Council    one chat completion, no OpenCode
 ```
+
+The supervisor decomposes the task, decides, and verifies everything that comes
+back; the worker reads, searches and edits within a sandbox. Results are claims
+until the supervisor checks them — see
+[`references/verification.md`](skills/worker/references/verification.md).
+
+## Requirements
+
+- [OpenCode](https://opencode.ai) v2 (`tests/test_opencode_v2_contract.sh`
+  checks the CLI shape this toolkit depends on), plus `jq`, `curl`, `perl`, `git`
+- A model OpenCode can reach, listed by `opencode models`:
+  - **Local**: any OpenAI-compatible server (vLLM, llama.cpp, Ollama,
+    LM Studio, …) added as a provider in `~/.config/opencode/opencode.jsonc`
+  - **Hosted**: any provider you signed in to with `opencode auth login`
 
 ## Install
 
 ```bash
-./install.sh
+./install.sh --model <provider/model>              # e.g. the name `opencode models` prints
+./install.sh --model <provider/model> --critic-model <another/model>
 ```
 
-- Four OpenCode personas, including `doc-critic` → `~/.config/opencode/agent/`
+Run in a terminal without `--model`, it lists your models and asks.
+
+- Four OpenCode personas (`ds-explorer`, `ds-reviewer`, `ds-worker`,
+  `doc-critic`) → `~/.config/opencode/agent/`
 - `ds-worker` / `ds-serve` / `ds-doctor` / `ds-worker-rr` / `sync-agents` → `~/.local/bin/`
 - `/doc-review` command → `~/.config/opencode/command/`
 - Skill → `~/.claude/skills/worker` · `~/.codex/skills/worker`
-
-Requires `opencode`, `jq`, `curl`, and a completed `opencode auth login`.
+- `DS_MODEL` (and `DS_MODEL_CRITIC`) → `~/.config/ds-worker/config`; the
+  installer never edits OpenCode's own configuration
 
 ```bash
-ds-doctor      # diagnostics
+ds-doctor      # diagnostics: tools, credentials, model, agents, endpoint
 ```
 
 ## Usage
@@ -50,19 +68,18 @@ ds-doctor      # diagnostics
 ds-worker explorer "Find every call site of checkToken in src/ — list all of them, not a sample. file:line required."
 ds-worker reviewer --file test.log "Rank the root-cause candidates for this failure, reading the log to its end."
 ds-worker worker "checkToken at src/auth.ts:42 returns 500 for an expired token. Make it 401. Verify: npm test -- auth"
-ds-worker omo oracle "Review this design for failure modes."
-ds-worker omo council "Debate whether to split the auth service."
-ds-worker omo ds-explorer "Find every call site of checkToken in src/."
-ds-worker omo ds-reviewer --file test.log "Rank the root-cause candidates."
 ds-worker critic --file docs/plan/foo.md "Audit the supplied document before delivery."
 ds-worker direct --file test.log "Rank the root-cause candidates."   # no OpenCode, no tools
+ds-worker omo oracle "Review this design for failure modes."         # needs OMO Slim
 sync-agents                 # check persona registry drift
 sync-agents --install       # install managed persona updates
 ```
 
-`direct` sends one chat completion straight to the GX10 endpoint with the
-files inlined. It needs only `curl` and `jq`, so it keeps working when the
-OpenCode CLI changes; the model has no tools, so hand it everything it needs.
+`direct` sends one chat completion straight to the model's OpenAI-compatible
+endpoint with the files inlined. It needs only `curl` and `jq`, so it keeps
+working when the OpenCode CLI changes; the model has no tools, so hand it
+everything it needs. For a hosted API, set `DS_MODEL_API_KEY_ENV` to the name
+of the environment variable that holds the key.
 
 ```bash
 ds-serve start|status|stop    # resident v2 backend; password in ~/.local/state/ds-worker/serve.password (0600)
@@ -70,34 +87,40 @@ ds-serve start|status|stop    # resident v2 backend; password in ~/.local/state/
 
 ```bash
 bash tests/test_opencode_v2_contract.sh                    # CLI shape vs. the installed opencode
-DS_CONTRACT_LIVE=1 bash tests/test_opencode_v2_contract.sh # + GX10 round trips
+DS_CONTRACT_LIVE=1 bash tests/test_opencode_v2_contract.sh # + real round trips to your model
+for t in tests/test_*.sh; do bash "$t"; done               # unit tests (stubbed opencode)
 ```
 
 ## Configuration
 
 `~/.config/ds-worker/config` — created by `install.sh` from
-[`config.example`](skills/worker/config.example) with everything commented out.
-Precedence is **environment > config file > built-in default**, so the file sets
-your normal preference and an environment variable still overrides a single call.
+[`config.example`](skills/worker/config.example). Precedence is
+**environment > config file > built-in default**, so the file sets your normal
+preference and an environment variable still overrides a single call.
 
 ```bash
 ds-doctor --config        # every setting, its value, and where that value came from
 ```
 
 It lives in your own config directory rather than beside the skill on purpose:
-the skill directory is a git repo shared between accounts by symlink, so a
-settings file there could not be written by every account that uses it, and every
-edit would dirty the working tree.
+the skill directory is a git checkout that may be linked into several tools or
+accounts, so a settings file there could not be written by every user of it,
+and every edit would dirty the working tree.
 
 The file is parsed, not sourced — unknown keys are reported with a line number
 and ignored, and nothing in it is executed.
 
 | Setting | Default |
 |---|---|
-| `DS_MODEL_EXPLORER` / `DS_MODEL_REVIEWER` / `DS_MODEL_WORKER` | `gx10/qwen3.8-flash-next` |
+| `DS_MODEL` | none — set by `install.sh --model`; every role uses it |
+| `DS_MODEL_EXPLORER` / `DS_MODEL_REVIEWER` / `DS_MODEL_WORKER` | `DS_MODEL` |
 | `DS_MODEL_EXPLORER_FALLBACK` / `DS_MODEL_REVIEWER_FALLBACK` / `DS_MODEL_WORKER_FALLBACK` | empty |
-| `DS_MODEL_CRITIC` | empty (agent frontmatter selects the model) |
+| `DS_MODEL_CRITIC` | empty (OpenCode's default model; pick one other than `DS_MODEL`) |
 | `DS_MODEL_RETRIES` | `2` (attempts per model before moving to the next) |
+| `DS_MODEL_ENDPOINT` | empty (the provider's `baseURL` in `opencode.jsonc`) |
+| `DS_MODEL_AUTODETECT` | `1` (follow a server that serves one model) |
+| `DS_MODEL_API_KEY_ENV` | empty (name of the variable holding an API key, for `direct`) |
+| `DS_RR_MODELS` | empty (models `ds-worker-rr` rotates over) |
 | `DS_IDLE_TIMEOUT` | `1200` seconds without an NDJSON write (`0` disables) |
 | `DS_MAX_RUNTIME` | `3600` seconds |
 | `DS_TIMEOUT` | `3600` seconds (legacy alias for `DS_MAX_RUNTIME`) |
@@ -110,16 +133,26 @@ and ignored, and nothing in it is executed.
 | `DS_AUTO` | `1` (passes `--auto`) |
 | `DS_STATE_DIR` | `~/.local/state/ds-worker` |
 
-### Choosing a model per role
+### Choosing models
 
-The three local roles use the Mac's `gx10` catalog on the serving endpoint.
-Fallbacks are opt-in; the wrapper detects the loaded model within that catalog.
-`ds-worker` tries the primary up to `DS_MODEL_RETRIES` times, then the
-fallback up to `DS_MODEL_RETRIES` times, stopping at the first success. You
-can override either model per role independently in the config file, or skip
-the whole chain for a single call with `--model <provider/model>` (runs
-exactly that model once); the wrapper always records the model actually used
-in its JSON result (`model`, `attempts`, `fallback_used`) and footer.
+Any model `opencode models` lists works; the toolkit has no built-in choice.
+A small, fast model is usually enough for `explorer` and `reviewer`, whose
+claims the supervisor verifies anyway; `worker` writes code, where a
+plausible-but-wrong edit is the expensive failure, so it may deserve a stronger
+one (`DS_MODEL_WORKER`). `critic` is a cross-model audit: give it a model other
+than `DS_MODEL`.
+
+`ds-worker` tries a role's model up to `DS_MODEL_RETRIES` times, then its
+fallback up to `DS_MODEL_RETRIES` times, stopping at the first success.
+`--model <provider/model>` skips the chain for one call. The JSON result
+records the model actually used (`model`, `attempts`, `fallback_used`).
+
+A local server that serves one model at a time makes a pinned name go stale
+when you load another. Autodetect asks the endpoint which models it serves and
+follows it only when that is one model — a single entry, or aliases of the same
+weights (entries sharing one `root`, as vLLM lists `--served-model-name`
+aliases) — and only to a model in the provider's catalog. A configured alias
+is kept as is; a hosted API listing several models keeps its pin.
 
 - `explorer` reads and searches only.
 - `reviewer` diagnoses logs, diffs, and test output without changing files.
@@ -129,16 +162,14 @@ in its JSON result (`model`, `attempts`, `fallback_used`) and footer.
   unchanged since the chain started — otherwise it stops immediately and
   hands the partial result back to the supervisor. See "Safety model" below.
 
-The `omo` gateway accepts only `oracle`, `council`, `librarian`, `designer`,
-`fixer`, `ds-explorer`, and `ds-reviewer`. OMO built-ins omit `--model`, so the
-active `~/.config/opencode/oh-my-opencode-slim.json` preset selects the model,
-including configured external seats. The five built-ins (`oracle`, `council`,
-`librarian`, `designer`, `fixer`) are OpenCode subagents, so each dispatches the
-primary `orchestrator` with `task(subagent_type='<agent>')` — `council` asks for
-every configured seat and a synthesis, the others request their named subagent
-once; the wrapper makes one attempt and leaves seat/model fallback to OMO Slim.
-`ds-explorer` and `ds-reviewer` use the existing local model configuration and
-report contracts.
+The optional `omo` gateway (needs the OMO Slim OpenCode plugin) accepts only
+`oracle`, `council`, `librarian`, `designer`, `fixer`, `ds-explorer`, and
+`ds-reviewer`. OMO built-ins omit `--model`, so the active
+OMO Slim preset selects the model, including configured external seats. The
+five built-ins are OpenCode subagents, so each dispatches the primary
+`orchestrator` with `task(subagent_type='<agent>')` — `council` asks for every
+configured seat and a synthesis, the others request their named subagent once;
+the wrapper makes one attempt and leaves seat/model fallback to OMO Slim.
 
 For a slow local reasoning model, set the provider's `chunkTimeout` and absolute
 `timeout` in OpenCode's provider configuration. `ds-worker` separately watches
@@ -159,10 +190,16 @@ NDJSON output activity and enforces `DS_MAX_RUNTIME`.
   the call and, after it, greps stderr for `Falling back to default agent` and
   **fails hard with exit 3**.
   Details: [references/opencode-cli.md](skills/worker/references/opencode-cli.md), "Traps".
-- MCP tools bypass the native permission keys entirely, so each agent
-  default-denies the MCP namespace (`"serena_*": deny`) and allows back a named
-  read-only set. Without this, an MCP server declared in `opencode.jsonc` hands
-  every agent a full shell regardless of `bash: deny`.
+- Every persona starts its permissions with `"*": deny` and allows tools back
+  by name. OpenCode v2 begins every agent from `"*": allow`, so without that
+  line a tool nobody named is granted — measured: the code-mode `execute` tool,
+  and through it `worktree_create`, `session_move` and remote MCP servers. With
+  it, `execute` is not offered at all, and reads still work. `execute` did not
+  reach shell or edit tools that were denied (they were absent inside it).
+- MCP tools sit outside the native permission keys, so an MCP server declared
+  in `opencode.jsonc` would otherwise hand every agent its tools — a shell
+  included — regardless of `bash: deny`. The wildcard deny covers them; the
+  personas allow back a named read-only set (`serena_find_symbol`, …).
 - The legacy `ds-worker` role is the only role with the wrapper's documented
   writing contract. The OMO `fixer` gateway is explicitly potentially writable
   and does not inherit the legacy worker's git-safety guard; review its diff

@@ -1,9 +1,13 @@
 ---
-description: Read-only GX10 DeepSeek/Qwen reviewer. Analyzes test logs, stack traces, diffs and build output; ranks root-cause candidates with evidence. Never edits, never claims a fix works.
+description: Read-only reviewer (ds = delegated subagent). Analyzes test logs, stack traces, diffs and build output; ranks root-cause candidates with evidence. Never edits, never claims a fix works.
 mode: all
-model: gx10/qwen3.8-flash-next
 temperature: 0.1
 permission:
+  # Default-deny first: OpenCode v2 starts every agent from `"*": allow`, so a
+  # tool nobody named (the code-mode `execute` tool and what it exposes, such
+  # as worktree_create, session_move and remote MCP servers) would otherwise be
+  # granted. Everything below is allowed back by name.
+  "*": deny
   edit: deny
   bash: deny
   read: allow

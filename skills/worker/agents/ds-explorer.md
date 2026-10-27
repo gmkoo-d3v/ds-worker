@@ -1,9 +1,13 @@
 ---
-description: Read-only GX10 DeepSeek/Qwen explorer. Maps a codebase, runs repetitive searches, and gathers implementation candidates. Returns evidence with file:line references. Never edits.
+description: Read-only explorer (ds = delegated subagent). Maps a codebase, runs repetitive searches, and gathers implementation candidates. Returns evidence with file:line references. Never edits.
 mode: all
-model: gx10/qwen3.8-flash-next
 temperature: 0.1
 permission:
+  # Default-deny first: OpenCode v2 starts every agent from `"*": allow`, so a
+  # tool nobody named (the code-mode `execute` tool and what it exposes, such
+  # as worktree_create, session_move and remote MCP servers) would otherwise be
+  # granted. Everything below is allowed back by name.
+  "*": deny
   edit: deny
   bash: deny
   read: allow

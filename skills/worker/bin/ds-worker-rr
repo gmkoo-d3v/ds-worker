@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
 # ds-worker-rr — round-robin wrapper around ds-worker.
 #
-# Was: alternates the model between two free cloud providers per call, to
-# spread load. Now pinned to the local GX10 box (unmetered, no rate
-# limit), so there is nothing left to rotate — this stays a single-entry
-# "rotation" so callers that already invoke ds-worker-rr keep working
-# unchanged. State is a small counter file per role.
-#
 #   ds-worker-rr <role> [ds-worker options] "<prompt>"
+#
+# Rotates --model across the models listed in DS_RR_MODELS (space-separated
+# provider/model ids), from the environment or ~/.config/ds-worker/config, one
+# step per call and per role — e.g. to spread load over several hosted APIs.
+# With fewer than two models there is nothing to rotate, so it passes straight
+# through and ds-worker resolves the model itself (DS_MODEL, autodetect).
 #
 # All options/arguments are passed through to ds-worker unchanged; this
 # wrapper only injects --model unless the caller already passed one.
 set -euo pipefail
 
-# One entry = no rotation; see the single-entry short-circuit below, which
-# delegates to ds-worker's autodetect instead of pinning this name.
-MODELS=(
-  "gx10/deepseek-v4-flash-exl3-cross"
-)
-
 [ $# -ge 1 ] || { echo "usage: ds-worker-rr <role> [options] \"<prompt>\"" >&2; exit 2; }
 role="$1"; shift
+# The role names a counter file below, so it must be a plain word.
+case "$role" in ''|*[!a-z-]*) echo "ds-worker-rr: invalid role '$role'" >&2; exit 2 ;; esac
 
 # If the caller already passed --model, don't override their choice.
 for a in "$@"; do
@@ -29,27 +25,31 @@ for a in "$@"; do
   fi
 done
 
+# Environment first, then the last DS_RR_MODELS line in the config file (the
+# same precedence ds-worker applies; the file is read, never sourced).
+CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
+list="${DS_RR_MODELS:-}"
+if [ -z "$list" ] && [ -f "$CONFIG" ]; then
+  list="$(sed -n 's/^[[:space:]]*DS_RR_MODELS[[:space:]]*=[[:space:]]*//p' "$CONFIG" | tail -1)"
+  list="${list%%#*}"; list="${list//\"/}"; list="${list//\'/}"
+fi
+read -r -a MODELS <<<"$list" || true
+
+if [ "${#MODELS[@]}" -lt 2 ]; then
+  exec ds-worker "$role" "$@"
+fi
+
 STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
 STATE_DIR="${STATE_DIR/#\~/$HOME}"
 mkdir -p "$STATE_DIR"
 COUNTER_FILE="$STATE_DIR/rr_${role}.count"
 
-# Simple flock-free increment; a lost race just repeats a provider once,
-# which is harmless for round-robin load spreading.
+# Simple flock-free increment; a lost race just repeats a model once, which is
+# harmless for round-robin load spreading.
 n=0
 [ -f "$COUNTER_FILE" ] && n="$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)"
 case "$n" in ''|*[!0-9]*) n=0 ;; esac
 idx=$(( n % ${#MODELS[@]} ))
 echo $(( n + 1 )) > "$COUNTER_FILE"
 
-model="${MODELS[$idx]}"
-
-# A single-entry list has nothing to rotate, and injecting --model would pin a
-# model name that goes stale the moment a different one is loaded — worse, it
-# disables ds-worker's serving-model autodetect. Delegate without --model and
-# let ds-worker resolve what is actually live.
-if [ "${#MODELS[@]}" -eq 1 ]; then
-  exec ds-worker "$role" "$@"
-fi
-
-exec ds-worker "$role" --model "$model" "$@"
+exec ds-worker "$role" --model "${MODELS[$idx]}" "$@"

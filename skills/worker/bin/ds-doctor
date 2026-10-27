@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ds-doctor — check that delegation to the GX10 Qwen agent is actually wired up.
+# ds-doctor — check that delegation to the configured model is actually wired up.
 set -uo pipefail
 
 # install.sh links this file into ~/.local/bin; resolve that to find lib/.
@@ -22,9 +22,11 @@ DS_CONFIG="${DS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ds-worker/config}"
 # Keep in sync with the defaults in ds-worker and ds-serve.
 ds_default() {
   case "$1" in
-    DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "gx10/qwen3.8-flash-next" ;;
+    DS_MODEL)          echo "" ;;   # no built-in model: install.sh --model sets it
+    DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER) echo "${DS_MODEL_EFF:-}" ;;   # = DS_MODEL
+    DS_MODEL_API_KEY_ENV|DS_RR_MODELS) echo "" ;;
     DS_MODEL_EXPLORER_FALLBACK|DS_MODEL_REVIEWER_FALLBACK|DS_MODEL_WORKER_FALLBACK) echo "" ;;
-    DS_MODEL_CRITIC) echo "" ;;   # empty = the doc-critic agent's own bound model
+    DS_MODEL_CRITIC) echo "" ;;   # empty = OpenCode's default model
     DS_MODEL_RETRIES)  echo 2 ;;
     DS_MODEL_AUTODETECT) echo 1 ;;
     DS_MODEL_ENDPOINT) echo "" ;;
@@ -68,16 +70,19 @@ ds_from_file() {
   ds_norm_value "$raw" "$1"
 }
 
+# Every role model defaults to DS_MODEL, so resolve that one first.
+DS_MODEL_EFF="${DS_MODEL:-$(ds_from_file DS_MODEL)}"
+
 # The point of a settings file is being able to see whether it actually took.
 if [ "${1:-}" = "--config" ]; then
   if [ -f "$DS_CONFIG" ]; then printf 'config: %s\n\n' "$DS_CONFIG"
   else printf 'config: %s  (not present — built-in defaults)\n\n' "$DS_CONFIG"; fi
   timeout_from_file="$(ds_from_file DS_TIMEOUT)"
   max_runtime_from_file="$(ds_from_file DS_MAX_RUNTIME)"
-  for k in DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER \
+  for k in DS_MODEL DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER \
            DS_MODEL_EXPLORER_FALLBACK DS_MODEL_REVIEWER_FALLBACK DS_MODEL_WORKER_FALLBACK DS_MODEL_RETRIES \
            DS_MODEL_CRITIC \
-           DS_MODEL_AUTODETECT DS_MODEL_ENDPOINT \
+           DS_MODEL_AUTODETECT DS_MODEL_ENDPOINT DS_MODEL_API_KEY_ENV DS_RR_MODELS \
            DS_TIMEOUT DS_IDLE_TIMEOUT DS_MAX_RUNTIME DS_SERVE DS_AUTO \
            DS_OPENCODE_HOST DS_OPENCODE_PORT DS_PORT_SCAN DS_STATE_DIR \
            DS_PROGRESS_INTERVAL DS_AUTO_RECOVER_READONLY \
@@ -133,22 +138,28 @@ if command -v opencode >/dev/null; then
   [ "${creds:-0}" -gt 0 ] && pass "credentials present" || fail "no credentials — run: opencode auth login"
 
   models="$(opencode models 2>/dev/null)"
+  [ -n "$DS_MODEL_EXPLORER$DS_MODEL_REVIEWER$DS_MODEL_WORKER" ] \
+    || fail "no model configured — set DS_MODEL=<provider/model> (install.sh --model does it)"
   for m in "$DS_MODEL_EXPLORER" "$DS_MODEL_REVIEWER" "$DS_MODEL_WORKER" \
            "$DS_MODEL_EXPLORER_FALLBACK" "$DS_MODEL_REVIEWER_FALLBACK" "$DS_MODEL_WORKER_FALLBACK"; do
     [ -n "$m" ] || continue   # no fallback configured is the default, not a failure
     printf '%s\n' "$models" | grep -qxF "$m" \
       && pass "model $m" \
-      || fail "model $m not available (opencode models | grep gx10)"
+      || fail "model $m not available (see: opencode models)"
   done
 
-  endpoint="${DS_MODEL_ENDPOINT:-$(ds_provider_baseurl "${DS_MODEL_WORKER%%/*}")}"
+  # Same precedence as ds-worker: environment, then the config file.
+  DS_MODEL_API_KEY_ENV="${DS_MODEL_API_KEY_ENV:-$(ds_from_file DS_MODEL_API_KEY_ENV)}"
+  endpoint="${DS_MODEL_ENDPOINT:-$(ds_from_file DS_MODEL_ENDPOINT)}"
+  endpoint="${endpoint:-$(ds_provider_baseurl "${DS_MODEL_WORKER%%/*}")}"
   if [ -n "$endpoint" ]; then
-    served="$(curl -sS -m 5 "${endpoint%/}/models" 2>/dev/null | jq -r '.data[0].id // empty' 2>/dev/null || true)"
-    if [ -n "$served" ]; then
-      info "serving now: ${DS_MODEL_WORKER%%/*}/$served (at $endpoint)"
-    else
-      info "serving now: nothing reachable at $endpoint (calls will fail until a model is loaded)"
-    fi
+    rc=0; served="$(ds_detect_served_model "$endpoint" "${DS_MODEL_WORKER#*/}")" || rc=$?
+    case "$rc" in
+      0) info "serving now: ${DS_MODEL_WORKER%%/*}/$served (at $endpoint)" ;;
+      2) fail "DS_MODEL_API_KEY_ENV names '$DS_MODEL_API_KEY_ENV', but that variable is unset or not a valid name" ;;
+      3) info "endpoint $endpoint serves several models — autodetect keeps the configured pin" ;;
+      *) info "endpoint $endpoint: unreachable or needs an API key (DS_MODEL_API_KEY_ENV)" ;;
+    esac
   fi
 
   agents="$(oc_agent_list)" || fail "'opencode debug agents' returned no JSON array — cannot list agents"
@@ -168,28 +179,16 @@ if command -v opencode >/dev/null; then
     fi
   done
 
-  # critic model split guard: DS_MODEL_CRITIC (config) must equal the model
-  # bound in the doc-critic agent's frontmatter, or the two invocation paths
-  # silently run different models (observed 2026-09-29 18:26 event).
-  critic_file="$agent_dir/doc-critic.md"
-  critic_bound="$(sed -n 's/^model:[[:space:]]*//p' "$critic_file" 2>/dev/null | head -1 | tr -d '\"')"
+  # doc-critic binds no model of its own: DS_MODEL_CRITIC picks it, else
+  # OpenCode's default model answers.
   critic_cfg="${DS_MODEL_CRITIC:-$(ds_from_file DS_MODEL_CRITIC 2>/dev/null || true)}"
-  [ -n "$critic_cfg" ] || critic_cfg="$(ds_default DS_MODEL_CRITIC)"
   if [ -z "$critic_cfg" ]; then
-    info "critic runs the doc-critic agent's own bound model: ${critic_bound:-unknown}"
-  elif [ -n "$critic_bound" ] && [ "$critic_cfg" = "$critic_bound" ]; then
-    pass "critic model $critic_cfg (config == agent frontmatter)"
+    info "critic: no DS_MODEL_CRITIC — doc-critic runs on OpenCode's default model (set one other than DS_MODEL for a cross-model audit)"
+  elif printf '%s\n' "$models" | grep -qxF "$critic_cfg"; then
+    pass "critic model $critic_cfg"
+    [ "$critic_cfg" != "$DS_MODEL_EFF" ] || info "critic model equals DS_MODEL — the audit is not cross-model"
   else
-    fail "critic model split: config pins $critic_cfg but doc-critic.md binds ${critic_bound:-nothing} — sync the two"
-  fi
-
-  critic_effective="${critic_cfg:-$critic_bound}"
-  if [ -n "$critic_effective" ] && printf '%s\n' "$models" | grep -qxF "$critic_effective"; then
-    info "critic model listed: $critic_effective (inference not verified)"
-  elif [ -n "$critic_effective" ]; then
-    info "critic model not listed: $critic_effective (callability unverified; binding preserved)"
-  else
-    fail "critic model unbound"
+    fail "critic model $critic_cfg not available (see: opencode models)"
   fi
 
   cmd_file="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/command/doc-review.md"

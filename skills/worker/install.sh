@@ -8,12 +8,23 @@
 #   install.sh --replace-with-backup
 #                                   resolve conflicts by first copying the
 #                                   foreign file to <file>.bak.<timestamp>
+#   install.sh --model <provider/model>
+#                                   the model every role uses (DS_MODEL in
+#                                   ~/.config/ds-worker/config); pick one that
+#                                   `opencode models` lists — a local server or
+#                                   a hosted API. Asked interactively when run
+#                                   in a terminal with none configured.
+#   install.sh --critic-model <provider/model>
+#                                   the doc-critic model (DS_MODEL_CRITIC);
+#                                   ideally a different model, for a
+#                                   cross-model audit
 #
 # Ownership rules live in lib/ownership.sh: absent -> create, identical ->
 # no-op, a file still matching its ledger hash -> overwrite, anything else ->
 # conflict (listed, untouched, abort). This script never edits shell rc files,
 # never edits opencode configuration, and never silently overwrites a file it
-# did not install. Provider auth stays manual: `opencode auth login`.
+# did not install. The only setting it writes is DS_MODEL / DS_MODEL_CRITIC in
+# its own config file. Provider auth stays manual: `opencode auth login`.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,22 +51,45 @@ SKILL_DST="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skill/worker"
 # behavior, and real files are the proven pattern (opencode ignores linked
 # agent definitions; opencode-cli.md trap #2).
 
-MODE="install"; PARTIAL=0; REPLACE=0
-for arg in "$@"; do
-  case "$arg" in
+MODE="install"; PARTIAL=0; REPLACE=0; MODEL_ARG=""; CRITIC_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --verify)                MODE="verify" ;;
     --partial)               PARTIAL=1 ;;
     --replace-with-backup)   REPLACE=1 ;;
+    --model)                 MODEL_ARG="${2:?--model needs provider/model}"; shift ;;
+    --critic-model)          CRITIC_ARG="${2:?--critic-model needs provider/model}"; shift ;;
     -h|--help)
-      sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 2 ;;
-    *) printf 'install.sh: unknown option %s\n' "$arg" >&2; exit 2 ;;
+    *) printf 'install.sh: unknown option %s\n' "$1" >&2; exit 2 ;;
   esac
+  shift
 done
+valid_model_ref() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._-]+/[^[:space:]]+$'; }
+for m in "$MODEL_ARG" "$CRITIC_ARG"; do
+  [ -z "$m" ] || valid_model_ref "$m" \
+    || { printf 'install.sh: %s is not provider/model (as `opencode models` prints it)\n' "$m" >&2; exit 2; }
+done
+
+# Replace the last uncommented KEY= line of the config file, or append one.
+set_config_key() {   # $1 = key, $2 = value
+  local tmp
+  tmp="$(mktemp "${CONFIG_FILE}.XXXXXX")"
+  awk -v k="$1" -v v="$2" '
+    { line[NR] = $0; if ($0 ~ "^[[:space:]]*" k "[[:space:]]*=") last = NR }
+    END { for (i = 1; i <= NR; i++) print (i == last ? k "=" v : line[i]); if (!last) print k "=" v }
+  ' "$CONFIG_FILE" >"$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+}
+config_value() {   # $1 = key; the last uncommented value in the config file
+  [ -f "$CONFIG_FILE" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONFIG_FILE" | tail -1
+}
 
 # ── step 1: dependency preflight ───────────────────────────────────────────
 missing=()
-for tool in jq curl git; do
+for tool in jq curl git perl; do
   command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -137,6 +171,11 @@ if [ "$MODE" = "verify" ]; then
   else
     printf 'VERIFY runtime: not-verified (opencode absent — files-only mode)\n'
   fi
+  if [ -n "${DS_MODEL:-$(config_value DS_MODEL)}" ]; then
+    printf 'VERIFY model: DS_MODEL=%s\n' "${DS_MODEL:-$(config_value DS_MODEL)}"
+  else
+    printf 'VERIFY model: not configured (install.sh --model <provider/model>)\n'; bad=1
+  fi
   printf 'VERIFY ledger: %s\n' "$LEDGER"
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
@@ -194,6 +233,28 @@ for i in "${!c_st[@]}"; do
     summary+=("SUMMARY $comp: $label")
   fi
 done
+
+# ── model: the one setting a fresh install cannot guess ─────────────────────
+if [ -z "$MODEL_ARG" ] && [ -z "$(config_value DS_MODEL)" ] && [ -t 0 ] && [ -t 1 ] \
+   && [ "$HAVE_OPENCODE" -eq 1 ]; then
+  printf 'No DS_MODEL configured. Models OpenCode can reach (first 20):\n'
+  opencode models 2>/dev/null | head -20 | sed 's/^/  /'
+  printf 'Model for every role, as provider/model (empty to skip): '
+  read -r MODEL_ARG || MODEL_ARG=""
+  [ -z "$MODEL_ARG" ] || valid_model_ref "$MODEL_ARG" \
+    || { printf 'install.sh: %s is not provider/model; skipped\n' "$MODEL_ARG" >&2; MODEL_ARG=""; }
+fi
+for pair in "DS_MODEL=$MODEL_ARG" "DS_MODEL_CRITIC=$CRITIC_ARG"; do
+  key="${pair%%=*}"; val="${pair#*=}"
+  [ -n "$val" ] || continue
+  set_config_key "$key" "$val"
+  summary+=("SUMMARY config: $key=$val")
+  if [ "$HAVE_OPENCODE" -eq 1 ] && ! opencode models 2>/dev/null | grep -qxF "$val"; then
+    summary+=("WARN $key: $val is not in 'opencode models' — add the provider to opencode.jsonc or sign in (opencode auth login)")
+  fi
+done
+[ -n "$(config_value DS_MODEL)" ] \
+  || summary+=("WARN model: no DS_MODEL configured — ds-worker refuses to run until you set it (install.sh --model <provider/model>)")
 
 # opencode visibility: what will actually load at session start.
 if [ "$HAVE_OPENCODE" -eq 1 ]; then

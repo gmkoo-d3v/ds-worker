@@ -61,11 +61,10 @@ If this is ambiguous, make no edits and return BLOCKED.
 
 ### `critic` — cross-model document judge
 
-The only persona not on the local engine: it runs the global `doc-critic` agent,
-whose model binding comes from the agent config. Use it when a long-form document
-(plan, report, task record) is about to be delivered and a second model's
-independent read is the point — the global AGENTS.md policy already mandates one
-such pass. Hand it the document with `--file` or exact paths; it reads only what
+It runs the global `doc-critic` agent on `DS_MODEL_CRITIC`, ideally a model
+other than the workers' `DS_MODEL`. Use it when a long-form document (plan,
+report, task record) is about to be delivered and a second model's independent
+read is the point. Hand it the document with `--file` or exact paths; it reads only what
 you give it, and any repo/log verification it wants comes back as numbered
 `EVIDENCE REQUEST`s — those are `explorer`/`reviewer` work, then you bring the
 answers back for the next verdict round. Its verdict is a gate to read, not

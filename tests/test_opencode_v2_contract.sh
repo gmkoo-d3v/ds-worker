@@ -4,7 +4,7 @@
 # other test fakes opencode, which is how the v1 -> v2 break went unnoticed.
 #
 #   bash tests/test_opencode_v2_contract.sh             # CLI shape only, no model call
-#   DS_CONTRACT_LIVE=1 bash tests/test_opencode_v2_contract.sh   # + GX10 round trips
+#   DS_CONTRACT_LIVE=1 bash tests/test_opencode_v2_contract.sh   # + round trips to your model
 #
 # Skips (exit 0) when opencode is not installed.
 set -euo pipefail
@@ -81,13 +81,17 @@ printf 'contract-marker-7\n' >"$TEST_ROOT/marker.txt"
 jq -e '.outcome == "CLEAN_RESULT" and (.text | contains("contract-marker-7"))' "$TEST_ROOT/explorer.json" >/dev/null \
   || fail "ds-worker explorer" "$(jq -c '{outcome, tools, errors, text: .text[0:300]}' "$TEST_ROOT/explorer.json")"
 printf 'ds-worker explorer reads a file through opencode v2: PASS\n'
+# The personas default-deny, so the v2 code-mode tool must not even be offered.
+jq -e '(.tools | index("execute")) == null' "$TEST_ROOT/explorer.json" >/dev/null \
+  || fail "default deny" "explorer used the execute tool: $(jq -c .tools "$TEST_ROOT/explorer.json")"
+printf 'explorer never reaches the code-mode execute tool: PASS\n'
 
 "$WORKER/bin/ds-worker" direct --file "$TEST_ROOT/marker.txt" --max-runtime 120 --json --quiet \
   "Reply with the exact contents of the attached file and nothing else." >"$TEST_ROOT/direct.json" \
   || fail "ds-worker direct" "exit $?; $(jq -c '{outcome, error}' "$TEST_ROOT/direct.json" 2>/dev/null)"
 jq -e '.outcome == "CLEAN_RESULT" and (.text | contains("contract-marker-7"))' "$TEST_ROOT/direct.json" >/dev/null \
   || fail "ds-worker direct" "$(jq -c '{outcome, error, text}' "$TEST_ROOT/direct.json")"
-printf 'ds-worker direct answers from the GX10 endpoint: PASS\n'
+printf 'ds-worker direct answers from the model endpoint: PASS\n'
 
 # ---- live: the ds-serve backend (own state dir, stopped on exit) ---------------------
 export DS_STATE_DIR="$TEST_ROOT/state"

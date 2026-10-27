@@ -1,86 +1,71 @@
 # ds-worker configuration
 #
 # Copy to ~/.config/ds-worker/config (install.sh does this for you if it is
-# missing) and uncomment what you want to change. Every value here is a default:
-# an environment variable of the same name always wins, so you can still
-# override per call:
+# missing) and uncomment what you want to change. An environment variable of
+# the same name always wins, so you can still override per call:
 #
-#   DS_MODEL_REVIEWER=gx10/qwen3.8-flash-next ds-worker reviewer "..."
+#   DS_MODEL_REVIEWER=<provider/model> ds-worker reviewer "..."
 #
 # This file is PARSED, not sourced. Only the keys listed below are read, values
 # are taken literally, and nothing here is executed. No $(...), no variables.
 # Check what is actually in effect with:  ds-doctor --config
 
 # --- models -----------------------------------------------------------------
-# See what this machine has:  opencode models | grep local-vllm
+# There is no built-in model. Pick any model OpenCode can reach — a local
+# server (vLLM, llama.cpp, Ollama, LM Studio, ...) registered as a provider in
+# opencode.jsonc, or a hosted API you signed in to with `opencode auth login` —
+# and name it the way `opencode models` prints it:
 #
-# Each role has a PRIMARY model and a FALLBACK model. ds-worker tries the
-# primary up to DS_MODEL_RETRIES times, and only after all of those fail does
-# it move to the fallback for up to DS_MODEL_RETRIES more tries — stopping at
-# the first success. --model on a single call bypasses this chain entirely
-# and runs exactly that model once. For the writing `worker` role, the chain
-# only continues to the next attempt while --dir is a git working tree
-# confirmed unchanged since the chain started (see references/verification.md, "Safety model").
+#   opencode models
+#   install.sh --model <provider/model>     # writes DS_MODEL below
 #
-# Built-in default (no config needed): local GX10 DeepSeek on the single `local-vllm`
-# provider (:8000), 2 tries, no fallback — no external API, no per-call
-# billing, no rate limit. The box serves one model at a time, so there is no
-# second endpoint to fall back to; when the primary is spent the call fails
-# outright instead of silently retrying a dead port.
+# DS_MODEL serves every role; the per-role keys override it for one role.
+#DS_MODEL=local/your-model
+#DS_MODEL_EXPLORER=
+#DS_MODEL_REVIEWER=
+#DS_MODEL_WORKER=
 
-#DS_MODEL_EXPLORER=gx10/qwen3.8-flash-next
-#DS_MODEL_REVIEWER=gx10/qwen3.8-flash-next
-#DS_MODEL_WORKER=gx10/qwen3.8-flash-next
-
-# Empty by default. Set these only while a second model is genuinely being
-# served — a fallback pointing at a model that is not loaded just burns
-# DS_MODEL_RETRIES more attempts before failing.
+# Each role tries its model up to DS_MODEL_RETRIES times, then its FALLBACK
+# model up to DS_MODEL_RETRIES more times, stopping at the first success.
+# Fallbacks are empty by default, so a spent primary fails the call outright.
+# --model on a single call bypasses the chain and runs exactly that model once.
+# For the writing `worker` role, the chain only continues while --dir is a git
+# working tree confirmed unchanged since the chain started (see
+# references/verification.md, "Safety model").
 #DS_MODEL_EXPLORER_FALLBACK=
 #DS_MODEL_REVIEWER_FALLBACK=
 #DS_MODEL_WORKER_FALLBACK=
 #DS_MODEL_RETRIES=2
 
-# The critic role runs the doc-critic agent, whose model is bound in the agent's
-# own config (cross-model by design — NOT a local GX10 model). Empty = leave it
-# to the agent config; set it only to pin a different model deliberately.
+# The critic role runs the doc-critic agent. Pick a model OTHER than DS_MODEL,
+# so the audit is cross-model. Empty = OpenCode's default model.
+# install.sh --critic-model <provider/model> writes it.
 #DS_MODEL_CRITIC=
 
-# --- serving-model autodetect ------------------------------------------------
-# The box serves ONE model at a time, so the pins above go stale as soon as you
-# load a different one. With autodetect on (the default) ds-worker asks the
-# endpoint which model is actually loaded and uses that, so swapping DeepSeek
-# for Qwen on :8000 needs no config change. It only overrides the pin when the
-# loaded model is in the provider's catalog in opencode.jsonc; otherwise it
-# keeps the pin and says why. --model always wins over autodetect.
+# ds-worker-rr rotates --model over these (space-separated), one step per call
+# and per role — for example to spread load over several hosted APIs. Fewer
+# than two = no rotation.
+#DS_RR_MODELS=
+
+# --- endpoint and autodetect -------------------------------------------------
+# DS_MODEL_ENDPOINT is the OpenAI-compatible base URL (ending in /v1) that
+# `ds-worker direct` and autodetect talk to. Empty = read the baseURL out of
+# opencode.jsonc for the model's provider, so the URL has one home.
 #
-# DS_MODEL_ENDPOINT is empty by default, meaning "read the baseURL out of
-# opencode.jsonc for this model's provider" — set it only to probe a different
-# endpoint than the one the provider is configured with.
-
-#DS_MODEL_AUTODETECT=1
+# A local server often serves ONE model at a time, so a pinned name goes stale
+# when you load another. With autodetect on, ds-worker asks the endpoint which
+# models it serves and switches only when that is one model (a single entry,
+# or aliases sharing one `root`, as vLLM lists them), and only to a model in
+# the provider's catalog in opencode.jsonc. A configured alias is kept; a
+# hosted API listing several models keeps its pin. --model always wins.
+#
+# DS_MODEL_API_KEY_ENV names the environment variable that holds the
+# endpoint's API key (for example OPENAI_API_KEY). Only `direct` and autodetect
+# use it; OpenCode roles use OpenCode's own credentials. Never put the key
+# itself in this file.
 #DS_MODEL_ENDPOINT=
-
-# Pin a specific catalog model instead (disables nothing, but autodetect will
-# still redirect it if a different model is loaded — use --model to truly pin):
-#DS_MODEL_EXPLORER=gx10/qwen3.8-flash-next
-#DS_MODEL_REVIEWER=gx10/qwen3.8-flash-next
-#DS_MODEL_WORKER=gx10/qwen3.8-flash-next
-
-# Cloud DeepSeek alternative, if the GX10 box is down or you want a different
-# model per role. Measured cost: pro is roughly 3-4x flash. explorer does wide
-# mechanical reading and its file:line claims get verified anyway, so it
-# defaults to flash; worker writes code, where a plausible-but-wrong edit is
-# the expensive failure.
-#DS_MODEL_EXPLORER=opencode-go/deepseek-v4-flash
-#DS_MODEL_REVIEWER=opencode-go/deepseek-v4-pro
-#DS_MODEL_WORKER=opencode-go/deepseek-v4-pro
-
-# OpenCode Zen's free tier bills $0 and needs no subscription. Expect rate
-# limits under load. Note the -free suffix: `opencode/deepseek-v4-flash` without
-# it is not a real model id, and the run fails at dispatch.
-#DS_MODEL_EXPLORER=opencode/deepseek-v4-flash-free
-#DS_MODEL_REVIEWER=opencode/deepseek-v4-flash-free
-#DS_MODEL_WORKER=opencode/deepseek-v4-flash-free
+#DS_MODEL_AUTODETECT=1
+#DS_MODEL_API_KEY_ENV=
 
 # A key may appear more than once; the last line wins. Copy a block, edit the
 # copy, and the earlier one stays as a record of what you moved away from.

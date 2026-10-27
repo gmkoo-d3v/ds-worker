@@ -5,11 +5,14 @@ description: Reviews long-form documents (docs, reports, plans, task records) pr
 # unrestricted default agent when the target is mode: subagent (measured, see
 # skill/worker/references/opencode-cli.md), so it must not be subagent-only.
 mode: all
-model: openai/gpt-6.1-sol
 permission:
+  # Default-deny first: OpenCode v2 starts every agent from `"*": allow`, so a
+  # tool nobody named (the code-mode `execute` tool and what it exposes, such
+  # as worktree_create, session_move and remote MCP servers) would otherwise be
+  # granted. Everything below is allowed back by name.
+  "*": deny
   read: allow
   external_directory: deny
-  "*": deny
   edit: deny
   bash: deny
   webfetch: deny

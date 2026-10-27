@@ -7,7 +7,11 @@ Official docs: <https://opencode.ai/docs/cli/>, <https://opencode.ai/docs/agents
 
 Every v2 call that differs from v1 goes through `lib/opencode-cli.sh`, and
 `tests/test_opencode_v2_contract.sh` checks the shape against the installed
-binary (`DS_CONTRACT_LIVE=1` adds GX10 round trips).
+binary (`DS_CONTRACT_LIVE=1` adds round trips to your configured model).
+
+The measurements were taken against a local model server on the LAN (a GX10
+box running vLLM, one model loaded at a time); "the model server" below means
+that machine.
 
 ## Headless execution
 
@@ -40,7 +44,7 @@ Actual flags, from `opencode run --help` (v2.1.4):
 
 Measured v2 behavior the wrapper relies on:
 
-- **Default is a shared background service.** Run through it, the GX10 endpoint
+- **Default is a shared background service.** Run through it, the model server
   was unreachable (`provider.transport` · `EHOSTUNREACH`) while `curl` from the
   same shell reached it, and `--standalone` from the same shell worked. ds-worker
   always passes `--standalone`, which is also what `DS_SERVE=off` always meant.
@@ -86,12 +90,12 @@ started from a normal shell on a spare port:
 - **Working directory.** A `--server` run works in the **client's** cwd: two
   clients in two directories each read their own `marker.txt` and reported
   their own path. Per-call `--dir` therefore works through a shared server.
-- **GX10 reachability.** A server started from our shell reached GX10, with
+- **Model server reachability.** A server started from our shell reached the model server, with
   tools. The EHOSTUNREACH seen earlier came from one `opencode service`
   process that had been started from another terminal app. Every run
   through it failed with EHOSTUNREACH. After `opencode service restart` from
   the shell these tests ran in, the new service process (same URL) read a
-  file with tools and answered from GX10. So whether the managed service
+  file with tools and answered from the model server. So whether the managed service
   can reach the LAN depends on where it was last started. macOS
   local-network permission for the launching app is the likely cause; that
   part is not verified.
@@ -111,7 +115,7 @@ started from a normal shell on a spare port:
   `oc_in_dir` runs the child with `</dev/null`.
 - **Cost of `--standalone`.** "Reply with exactly: pong" took 3.2–3.7 s with
   `--standalone` vs 1.5–1.9 s through a running server (5 runs each). The same
-  request by plain `curl` to GX10 took 0.6 s.
+  request by plain `curl` to the model server took 0.6 s.
 
 What held on 1.18.18:
 
@@ -289,27 +293,39 @@ itself never took effect, and this guarantee disappears with it.
 
 ## Models (catalog vs. actually loaded)
 
-The GX10 box serves ONE model at a time on `:8000` behind the single `local-vllm`
-provider. The list below is the catalog in `opencode.jsonc`, not what is live.
-ds-worker resolves the live one itself (see `DS_MODEL_AUTODETECT`); to check by
-hand: `curl -s http://localhost:8000/v1/models`
+A local server often serves ONE model at a time behind a single provider. The
+provider's model list in `opencode.jsonc` is a catalog, not what is live.
+ds-worker resolves the live one itself when the server serves one model —
+one entry, or aliases sharing a `root` (see
+`DS_MODEL_AUTODETECT`); to check by hand:
+`curl -s http://<model-host>:<port>/v1/models`
 
 Adding an entry here is not enough on its own: `opencode serve` snapshots the
 config at startup, so run `ds-serve restart` afterwards. Against a stale backend
 the new model fails as `UnknownError: Unexpected server error`, with nothing in
 the stream to say the model is simply unknown to it. Confirm what a backend
-actually knows with: `curl -s "$(ds-serve url)/config" | jq '.provider["local-vllm"].models | keys'`
+actually knows with `opencode models` against it, or (v1) its `/config`.
 
+A local provider entry in `opencode.jsonc` looks like this (any
+OpenAI-compatible server; the id `local` is yours to choose):
+
+```jsonc
+{
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://<model-host>:8000/v1" },
+      "models": { "your-model": {} }
+    }
+  }
+}
 ```
-gx10/qwen3.8-flash-next      # the GX10 engine (:8000) - default primary, all roles; no fallback
-gx10/gx10-compact            # alias on the same engine - check `opencode models` before pinning
-gx10/deepseek-v4-flash       # alias on the same engine - check `opencode models` before pinning
-opencode/deepseek-v4-flash-free         # cloud free tier, unused by default
-```
+
+`opencode models` then lists `local/your-model`, which is what `DS_MODEL` takes.
 
 Provider config (baseURL, timeouts) lives in `~/.config/opencode/opencode.jsonc`
 under the provider used by the selected model. Check the resolved provider with
-`opencode models | grep local-vllm` and `opencode debug config`. For a slow local
+`opencode models` and `opencode debug config`. For a slow local
 reasoning model, the relevant options are:
 
 ```jsonc

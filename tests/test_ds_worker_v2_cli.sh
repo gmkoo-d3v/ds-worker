@@ -71,7 +71,7 @@ EOF
 chmod +x "$FAKE_BIN/opencode" "$FAKE_BIN/curl"
 
 export PATH="$FAKE_BIN:$PATH"
-export DS_CONFIG=/dev/null DS_STATE_DIR="$TEST_ROOT/state" DS_MODEL_AUTODETECT=0
+export DS_CONFIG=/dev/null DS_STATE_DIR="$TEST_ROOT/state" DS_MODEL_AUTODETECT=0 DS_MODEL=local/test-model
 export XDG_CONFIG_HOME="$TEST_ROOT/xdg"
 unset DS_SERVE OPENCODE_CONFIG_CONTENT
 
@@ -91,8 +91,8 @@ ARGV="$(cat "$TEST_ROOT/basic/0.argv")"
   || fail "cwd" "child ran in $(cat "$TEST_ROOT/basic/0.cwd"), expected $WORK_DIR"
 printf '%s\n' "$ARGV" | grep -qx -- '--standalone' || fail "standalone" "argv lacks --standalone:
 $ARGV"
-printf '%s\n' "$ARGV" | grep -qx -- 'gx10/qwen3.8-flash-next#high' \
-  || fail "variant" "expected --model gx10/qwen3.8-flash-next#high; argv:
+printf '%s\n' "$ARGV" | grep -qx -- 'local/test-model#high' \
+  || fail "variant" "expected --model local/test-model#high; argv:
 $ARGV"
 printf '%s\n' "$ARGV" | grep -qx -- "$CALLER_DIR/note.txt" \
   || fail "file" "relative --file was not resolved against the caller cwd; argv:
@@ -121,6 +121,15 @@ jq -e --arg url "$URL" '.backend == $url and .recovered' "$TEST_ROOT/serve.out" 
 jq -e '.backend == "standalone"' "$TEST_ROOT/basic.out" >/dev/null || fail "backend" "basic run must report backend=standalone"
 printf 'DS_SERVE=auto runs --server with OPENCODE_PASSWORD; recovery stays --standalone: PASS\n'
 
+# ---- no model configured: refuse before any run ---------------------------------------
+mkdir -p "$TEST_ROOT/nomodel"; RC=0
+(cd "$CALLER_DIR" && DS_TEST_ARGV_DIR="$TEST_ROOT/nomodel" DS_MODEL= "$DS_WORKER" explorer --dir "$WORK_DIR" "map") \
+  >/dev/null 2>"$TEST_ROOT/nomodel.err" || RC=$?
+[ "$RC" -eq 2 ] && grep -q 'no model configured' "$TEST_ROOT/nomodel.err" \
+  && [ -z "$(ls "$TEST_ROOT/nomodel")" ] \
+  || fail "no model" "expected exit 2 before any run, got $RC: $(cat "$TEST_ROOT/nomodel.err")"
+printf 'ds-worker refuses to run a local role with no model configured: PASS\n'
+
 # ---- agent list: cold-start [] is retried -------------------------------------------
 DS_TEST_COLD="$TEST_ROOT/cold.flag" run_case cold explorer --dir "$WORK_DIR" --json --quiet "map"
 [ -e "$TEST_ROOT/cold.flag" ] || fail "cold" "stub never served the cold-start []"
@@ -135,13 +144,13 @@ printf 'oc_agent_list prints visible agents as name (mode): PASS\n'
 # ---- opencode.jsonc with comments and trailing commas -------------------------------
 cat >"$XDG_CONFIG_HOME/opencode/opencode.jsonc" <<'EOF'
 {
-  // the GX10 box
+  // a local model server
   "provider": {
-    "gx10": { /* local vLLM */ "options": { "baseURL": "http://gx10.invalid:8000/v1", }, },
+    "local": { /* local vLLM */ "options": { "baseURL": "http://model.invalid:8000/v1", }, },
   },
 }
 EOF
 . "$ROOT/skills/worker/lib/model-endpoint.sh"
-URL="$(ds_provider_baseurl gx10)"
-[ "$URL" = "http://gx10.invalid:8000/v1" ] || fail "jsonc" "expected the baseURL through comments, got '$URL'"
+URL="$(ds_provider_baseurl local)"
+[ "$URL" = "http://model.invalid:8000/v1" ] || fail "jsonc" "expected the baseURL through comments, got '$URL'"
 printf 'provider baseURL is read from commented opencode.jsonc: PASS\n'

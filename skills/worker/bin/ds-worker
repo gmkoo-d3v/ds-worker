@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# ds-worker — delegate one unit of work to a GX10 Qwen agent running under OpenCode.
+# ds-worker — delegate one unit of work to a model you configure, running as an
+# OpenCode agent (local server or hosted API). ds = delegated subagent.
 # Built for the OpenCode v2 CLI (see lib/opencode-cli.sh).
 #
 #   ds-worker <role> [options] "<prompt>"
@@ -12,7 +13,7 @@
 #   critic     cross-model audit of long documents — runs the doc-critic agent;
 #              its model is bound in the agent config, not in this wrapper
 #   omo        gateway to the OMO Slim agents (see "omo agents" below)
-#   direct     one chat completion straight to the GX10 endpoint: no OpenCode,
+#   direct     one chat completion straight to the model endpoint: no OpenCode,
 #              no tools, files inlined (`ds-worker direct --help`)
 #
 # omo agents (ds-worker omo <agent> "<prompt>"):
@@ -77,7 +78,7 @@ ds_load_config() {
   # Snapshot what the environment already set, so a later line in the file can
   # override an earlier one (last wins, as `ds-doctor --config` reports) without
   # any file line ever overriding the environment.
-  for key in DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER \
+  for key in DS_MODEL DS_MODEL_EXPLORER DS_MODEL_REVIEWER DS_MODEL_WORKER DS_MODEL_API_KEY_ENV DS_RR_MODELS \
              DS_MODEL_EXPLORER_FALLBACK DS_MODEL_REVIEWER_FALLBACK DS_MODEL_WORKER_FALLBACK DS_MODEL_RETRIES \
              DS_MODEL_CRITIC \
              DS_MODEL_AUTODETECT DS_MODEL_ENDPOINT \
@@ -92,7 +93,7 @@ ds_load_config() {
     key="${line%%=*}"; val="${line#*=}"
     key="${key//[[:space:]]/}"
     case "$key" in
-      DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER|\
+      DS_MODEL|DS_MODEL_EXPLORER|DS_MODEL_REVIEWER|DS_MODEL_WORKER|DS_MODEL_API_KEY_ENV|DS_RR_MODELS|\
       DS_MODEL_EXPLORER_FALLBACK|DS_MODEL_REVIEWER_FALLBACK|DS_MODEL_WORKER_FALLBACK|DS_MODEL_RETRIES|\
       DS_MODEL_CRITIC|\
       DS_MODEL_AUTODETECT|DS_MODEL_ENDPOINT|\
@@ -119,36 +120,42 @@ DS_AUTO_RECOVER_READONLY="${DS_AUTO_RECOVER_READONLY:-1}"
 DS_RECOVERY_IDLE_TIMEOUT="${DS_RECOVERY_IDLE_TIMEOUT:-60}"
 DS_RECOVERY_MAX_RUNTIME="${DS_RECOVERY_MAX_RUNTIME:-180}"
 
-# Primary model per role: local GX10 box (vLLM, :8000), the only endpoint served.
-# There is no second endpoint to fall back to, so the fallback defaults are empty
-# and the chain is primary-only; set DS_MODEL_*_FALLBACK to re-arm a second model.
-DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-gx10/qwen3.8-flash-next}"
-DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-gx10/qwen3.8-flash-next}"
-DS_MODEL_WORKER="${DS_MODEL_WORKER:-gx10/qwen3.8-flash-next}"
+# No built-in model: DS_MODEL (provider/model, as `opencode models` lists it)
+# is set at install time (`install.sh --model`) and serves every role unless a
+# per-role key overrides it. Fallbacks are empty, so the chain is primary-only
+# until DS_MODEL_*_FALLBACK names a second model.
+DS_MODEL="${DS_MODEL:-}"
+DS_MODEL_EXPLORER="${DS_MODEL_EXPLORER:-$DS_MODEL}"
+DS_MODEL_REVIEWER="${DS_MODEL_REVIEWER:-$DS_MODEL}"
+DS_MODEL_WORKER="${DS_MODEL_WORKER:-$DS_MODEL}"
 DS_MODEL_EXPLORER_FALLBACK="${DS_MODEL_EXPLORER_FALLBACK:-}"
 DS_MODEL_REVIEWER_FALLBACK="${DS_MODEL_REVIEWER_FALLBACK:-}"
 DS_MODEL_WORKER_FALLBACK="${DS_MODEL_WORKER_FALLBACK:-}"
-# The critic role runs the doc-critic agent, whose own config binds a cross-model
-# (openai/gpt-6.1-sol): no local pin, no autodetect, no fallback chain. Setting
-# DS_MODEL_CRITIC pins a different model for the critic role, exactly once per
-# attempt — same semantics as --model.
+# The critic role runs the doc-critic agent on DS_MODEL_CRITIC — meant to be a
+# different model from DS_MODEL, so the audit is cross-model. Empty = no --model,
+# so OpenCode's default model answers. No autodetect, no fallback chain.
 DS_MODEL_CRITIC="${DS_MODEL_CRITIC:-}"
 DS_MODEL_RETRIES="${DS_MODEL_RETRIES:-2}"    # attempts per model before moving on
 
-# The GX10 box serves exactly one model at a time, so the configured primary
-# goes stale the moment a different model is loaded. With autodetect on (the
-# default), ds-worker asks the endpoint which model is actually loaded and uses
-# that instead. DS_MODEL_ENDPOINT is derived from the provider's baseURL in
+# A local server that serves one model at a time makes the configured primary
+# go stale the moment a different model is loaded. With autodetect on (the
+# default), ds-worker asks the endpoint which models it serves and follows it
+# only when that is one model: a single entry, or aliases of the same weights
+# (lib/model-endpoint.sh). A hosted API serves several, so its pin is kept. DS_MODEL_ENDPOINT is derived from the provider's baseURL in
 # opencode.jsonc when left empty, so the URL has exactly one home.
 DS_MODEL_AUTODETECT="${DS_MODEL_AUTODETECT:-1}"
 DS_MODEL_ENDPOINT="${DS_MODEL_ENDPOINT:-}"
 DS_MODEL_DETECT_TIMEOUT="${DS_MODEL_DETECT_TIMEOUT:-5}"
+# Name of the environment variable holding an API key for the endpoint (direct
+# mode and autodetect only; OpenCode keeps its own credentials). The key itself
+# never goes in the config file.
+DS_MODEL_API_KEY_ENV="${DS_MODEL_API_KEY_ENV:-}"
 
 die() { printf 'ds-worker: %s\n' "$1" >&2; exit 2; }
 note() { printf 'ds-worker: %s\n' "$1" >&2; }
 
 usage() {
-  sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   cat >&2 <<'USAGE'
 
 Examples:
@@ -161,15 +168,15 @@ Examples:
 
 Each role's model defaults to a primary/fallback chain: the primary model up to
 DS_MODEL_RETRIES times, then the fallback model up to DS_MODEL_RETRIES times,
-stopping at the first success (default: local DeepSeek on :8000, 2 attempts; no
-fallback is configured, so the run fails outright once those are spent — set
+stopping at the first success (default: DS_MODEL, 2 attempts; no fallback is
+configured, so the run fails outright once those are spent — set
 DS_MODEL_<ROLE>_FALLBACK to add a second model). --model bypasses the chain and
 runs exactly that model once.
 For the writing 'worker' role, the chain only continues while --dir is a git
 working tree confirmed unchanged since the chain started.
-The 'critic' role runs the doc-critic agent on the model bound in the agent's
-own config (cross-model by design, not the local engine): no autodetect, no
-fallback chain; DS_MODEL_CRITIC or --model pin a model deliberately.
+The 'critic' role runs the doc-critic agent on DS_MODEL_CRITIC (pick a model
+other than DS_MODEL, for a cross-model audit; empty = OpenCode's default
+model): no autodetect, no fallback chain; --model pins one deliberately.
 
 options:
   --dir <path>        working directory for the agent (default: $PWD); the
@@ -295,6 +302,11 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PROMPT" ] || die "no prompt given"
+# The local roles need a model; the critic and OMO built-ins may leave it to
+# their agent or preset.
+if [ -z "$MODEL" ] && [ "$ROLE_HAS_LOCAL_MODEL" -eq 1 ] && [ "$OMO_CONFIGURED" -eq 0 ]; then
+  die "no model configured for role '$ROLE': set DS_MODEL=<provider/model> in $DS_CONFIG (install.sh --model does it), or pass --model"
+fi
 command -v opencode >/dev/null || die "opencode not found on PATH"
 command -v jq >/dev/null || die "jq not found on PATH"
 
@@ -612,7 +624,7 @@ fi
 # ds_provider_baseurl and ds_detect_served_model live in lib/model-endpoint.sh.
 
 ds_resolve_served_model() {
-  local provider="${MODEL%%/*}" configured="${MODEL#*/}" endpoint detected candidate
+  local provider="${MODEL%%/*}" configured="${MODEL#*/}" endpoint detected candidate rc=0
   endpoint="$DS_MODEL_ENDPOINT"
   if [ -z "$endpoint" ]; then
     endpoint="$(ds_provider_baseurl "$provider")" || endpoint=""
@@ -621,10 +633,13 @@ ds_resolve_served_model() {
     note "autodetect: no baseURL for provider '$provider' in opencode.jsonc; keeping $MODEL"
     return 0
   fi
-  detected="$(ds_detect_served_model "$endpoint")" || {
-    note "autodetect: $endpoint unreachable; keeping configured $MODEL"
-    return 0
-  }
+  detected="$(ds_detect_served_model "$endpoint" "$configured")" || rc=$?
+  case "$rc" in
+    0) ;;
+    2) note "autodetect: DS_MODEL_API_KEY_ENV names '${DS_MODEL_API_KEY_ENV}', but that variable is unset or not a valid name; keeping configured $MODEL"; return 0 ;;
+    3) note "autodetect: $endpoint serves several models; keeping configured $MODEL"; return 0 ;;
+    *) note "autodetect: $endpoint unreachable; keeping configured $MODEL"; return 0 ;;
+  esac
   [ "$detected" = "$configured" ] && return 0
   candidate="$provider/$detected"
   if opencode models 2>/dev/null | grep -qxF "$candidate"; then
@@ -735,7 +750,7 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
 
   # Never pass an empty --model: an OMO-configured call lets the preset choose.
   # No --server means a private --standalone server: v2's default is the
-  # managed background service, whose reach to the GX10 box depends on where
+  # managed background service, whose reach to a LAN model server depends on where
   # it was last started (it has failed with EHOSTUNREACH).
   ARGS=(run --agent "$AGENT" --format json)
   [ -n "$MODEL" ]   && ARGS+=(--model "$(oc_model_ref "$MODEL" "$VARIANT")")
