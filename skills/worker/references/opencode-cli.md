@@ -55,12 +55,51 @@ Measured v2 behavior the wrapper relies on:
 - Errors arrive as a `{"type":"error","error":{"type":...,"message":...}}` event
   with exit 1; ds-worker copies the messages into the result's `errors` array.
 
-## Long-lived backend (1.18.18; not ported to v2)
+## Long-lived backend (v2 measured; `ds-serve` not ported yet)
 
-v2 `opencode serve --hostname --port` still exists, but it now prints a
-generated server password and `GET /config` answers `200` with the **web UI
-HTML**, so `ds-serve`'s ownership probe below would accept any server. Until
-`ds-serve` is ported, `ds-worker` ignores `DS_SERVE` with a notice.
+Until `ds-serve` is ported, `ds-worker` ignores `DS_SERVE` with a notice. What a
+v2 `opencode serve` does, measured on 2026-10-27 against a server started from
+a normal shell on a spare port:
+
+- **Password.** Without `OPENCODE_SERVER_PASSWORD` the server generates one and
+  prints it on startup. With it set, that value is used and nothing is printed.
+  Basic auth with username `opencode`; a wrong password or user gets `401`.
+- **Which paths need auth.** `/api/*` and `/openapi.json` (124 paths) answer
+  `401` without auth. Every other path, `/config` included, serves the web UI
+  HTML with `200`, so a 200 there proves nothing.
+- **Readiness and ownership probe.** `GET /api/info` with auth returns JSON with
+  `version`, `pid` and `urls`. The `pid` matched the pid `nohup` reported, so
+  the probe can check "ours" directly instead of only "something answers".
+- **Client auth.** `run --server URL` with no credential exits 1 with
+  `Server at URL requires a password; set OPENCODE_PASSWORD`.
+  `OPENCODE_PASSWORD`, `OPENCODE_SERVER_PASSWORD`, and `user:pass@` in the URL
+  all worked. Prefer the environment variable: argv is visible in `ps`.
+- **Working directory.** A `--server` run works in the **client's** cwd: two
+  clients in two directories each read their own `marker.txt` and reported
+  their own path. Per-call `--dir` therefore works through a shared server.
+- **GX10 reachability.** A server started from our shell reached GX10, with
+  tools. The EHOSTUNREACH seen earlier came from one `opencode service`
+  process that had been started from another terminal app. Every run
+  through it failed with EHOSTUNREACH. After `opencode service restart` from
+  the shell these tests ran in, the new service process (same URL) read a
+  file with tools and answered from GX10. So whether the managed service
+  can reach the LAN depends on where it was last started. macOS
+  local-network permission for the launching app is the likely cause; that
+  part is not verified.
+- **Managed service auth.** The managed service also answers `401` on
+  `/api/info` without credentials, but `opencode run` and `opencode api`
+  authenticate to it on their own; no variable was set.
+- **Per-call config does not travel.** `OPENCODE_CONFIG_CONTENT` on the client
+  did not reach the server: a tools-off override still let the agent read a
+  file. The read-only recovery step must stay `--standalone`.
+- **Agent edits are picked up late.** A new agent file was `Agent not found` on
+  the call right after it was written; an edited one answered with the old
+  definition right after the edit and with the new one 5 s later. No restart
+  is needed, but there is a stale window of a few seconds (measured with a
+  project-local `.opencode/agent/`).
+- **Cost of `--standalone`.** "Reply with exactly: pong" took 3.2–3.7 s with
+  `--standalone` vs 1.5–1.9 s through a running server (5 runs each). The same
+  request by plain `curl` to GX10 took 0.6 s.
 
 What held on 1.18.18:
 
