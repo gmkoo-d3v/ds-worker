@@ -13,7 +13,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER="$ROOT/skills/worker"
 command -v opencode >/dev/null || { printf 'opencode v2 contract: SKIP (opencode not on PATH)\n'; exit 0; }
 TEST_ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/opencode-contract.XXXXXX")" && pwd)"
-cleanup() { rm -rf "$TEST_ROOT"; }
+cleanup() {
+  DS_STATE_DIR="$TEST_ROOT/state" "$WORKER/bin/ds-serve" stop >/dev/null 2>&1 || true
+  rm -rf "$TEST_ROOT"
+}
 trap cleanup EXIT
 
 fail() { printf '%s: FAIL — %s\n' "$1" "$2" >&2; exit 1; }
@@ -63,8 +66,11 @@ printf 'opencode models lists provider/model rows: PASS\n'
 RC=0
 (cd "$TEST_ROOT" && perl -e 'alarm shift; exec @ARGV' 120 \
   opencode run --standalone --agent ds-contract-no-such-agent --format json -- "Reply with exactly: pong") \
-  >"$TEST_ROOT/unknown.out" 2>&1 || RC=$?
+  </dev/null >"$TEST_ROOT/unknown.out" 2>&1 || RC=$?
 [ "$RC" -ne 0 ] || fail "unknown agent" "opencode ran an unknown agent with exit 0: $(head -c 400 "$TEST_ROOT/unknown.out")"
+# 142 = our alarm fired: a hang is not a rejection.
+[ "$RC" -ne 142 ] && grep -q 'Agent not found' "$TEST_ROOT/unknown.out" \
+  || fail "unknown agent" "expected an 'Agent not found' error, got exit $RC: $(head -c 400 "$TEST_ROOT/unknown.out")"
 printf 'opencode run rejects an unknown agent (exit %s): PASS\n' "$RC"
 
 # ---- live: ds-worker through OpenCode, and direct without it -----------------------------
@@ -82,3 +88,30 @@ printf 'ds-worker explorer reads a file through opencode v2: PASS\n'
 jq -e '.outcome == "CLEAN_RESULT" and (.text | contains("contract-marker-7"))' "$TEST_ROOT/direct.json" >/dev/null \
   || fail "ds-worker direct" "$(jq -c '{outcome, error, text}' "$TEST_ROOT/direct.json")"
 printf 'ds-worker direct answers from the GX10 endpoint: PASS\n'
+
+# ---- live: the ds-serve backend (own state dir, stopped on exit) ---------------------
+export DS_STATE_DIR="$TEST_ROOT/state"
+DS_SERVE=auto "$WORKER/bin/ds-worker" explorer --dir "$TEST_ROOT" --max-runtime 300 --json --quiet \
+  "Read marker.txt in the working directory and report its exact contents in FINDINGS." \
+  >"$TEST_ROOT/served.json" || fail "DS_SERVE=auto" "exit $?; $(jq -c '{backend, outcome, errors}' "$TEST_ROOT/served.json" 2>/dev/null)"
+jq -e '(.backend | startswith("http://")) and .outcome == "CLEAN_RESULT" and (.text | contains("contract-marker-7"))' \
+  "$TEST_ROOT/served.json" >/dev/null \
+  || fail "DS_SERVE=auto" "$(jq -c '{backend, outcome, errors, text: .text[0:300]}' "$TEST_ROOT/served.json")"
+printf 'ds-worker DS_SERVE=auto runs through the password-protected ds-serve backend: PASS\n'
+
+# Recovery continues a backend session from a private --standalone server.
+SID="$(jq -r '.session' "$TEST_ROOT/served.json")"
+(cd "$TEST_ROOT" && perl -e 'alarm shift; exec @ARGV' 180 opencode run --standalone --agent ds-explorer \
+  --format json --session "$SID" --continue -- "Repeat the file contents you reported, nothing else.") \
+  </dev/null >"$TEST_ROOT/cross.out" 2>&1 || fail "cross-backend session" "exit $?; $(head -c 300 "$TEST_ROOT/cross.out")"
+[ "$(jq -r '.sessionID // empty' "$TEST_ROOT/cross.out" 2>/dev/null | sort -u)" = "$SID" ] \
+  && jq -r 'select(.type=="text")|.part.text' "$TEST_ROOT/cross.out" | grep -q contract-marker-7 \
+  || fail "cross-backend session" "standalone did not continue $SID: $(head -c 300 "$TEST_ROOT/cross.out")"
+printf 'a --standalone run continues a session the backend created: PASS\n'
+
+# A caller password with a quote and a backslash survives curl's -K quoting.
+"$WORKER/bin/ds-serve" stop >/dev/null 2>&1
+OPENCODE_SERVER_PASSWORD='q"uo\te' "$WORKER/bin/ds-serve" start >/dev/null 2>&1 \
+  && OPENCODE_SERVER_PASSWORD='q"uo\te' "$WORKER/bin/ds-serve" status >/dev/null 2>&1 \
+  || fail "quoted password" "ds-serve could not start or probe with a quoted caller password"
+printf 'ds-serve probes a real server with a quoted caller password: PASS\n'

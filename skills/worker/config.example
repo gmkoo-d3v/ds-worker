@@ -91,8 +91,9 @@
 #                  0 disables this outer idle watchdog
 # DS_MAX_RUNTIME   absolute wall-clock limit for one call (exit 124)
 # DS_TIMEOUT       legacy alias for DS_MAX_RUNTIME
-# DS_SERVE    off = fresh process per call (default), auto = opt-in shared backend
-#             (auto is ignored with a notice until ds-serve supports OpenCode v2)
+# DS_SERVE    off = private --standalone server per call (default),
+#             auto = run --server against the ds-serve backend (password in
+#             $DS_STATE_DIR/serve.password); read-only recovery stays --standalone
 # DS_AUTO     1 = pass --auto. Required for headless runs; it cannot override a
 #             `deny` in an agent definition, which is what keeps the read-only
 #             roles read-only. Set to 0 only when debugging permission prompts.
@@ -113,7 +114,8 @@
 # --- backend ----------------------------------------------------------------
 # DS_OPENCODE_PORT is a starting point. If it is busy (an OpenCode TUI often
 # holds 4096), ds-serve scans upward and never attaches to a server it did not
-# start. Binding anything other than loopback requires OPENCODE_SERVER_PASSWORD.
+# start (checked by the pid an authenticated GET /api/info reports). Binding
+# anything other than loopback requires a caller-set OPENCODE_SERVER_PASSWORD.
 
 #DS_OPENCODE_HOST=127.0.0.1
 #DS_OPENCODE_PORT=4096

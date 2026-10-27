@@ -591,13 +591,19 @@ ds_build_result() {
 # ds-serve prints the URL of a backend *it* owns. It never hands back a foreign
 # server (e.g. an OpenCode TUI squatting on 4096) — attaching to one of those
 # fails with "Session not found" and would disturb the user's live session.
-# Not yet ported to OpenCode v2: a v2 server requires a password, and its GET
-# /config now serves the web UI with 200, so ds-serve's ownership probe cannot
-# tell its own server from a foreign one. Until it is, every run gets a private
-# --standalone server and DS_SERVE only earns a notice.
+# A v2 server requires a password: ds-serve keeps it in serve.password (or the
+# caller set OPENCODE_SERVER_PASSWORD, which the client accepts as it is), and
+# oc_in_dir hands it to the child as OPENCODE_PASSWORD, never on argv.
 ATTACH=""
+OC_SERVER_PASSWORD=""
 if [ "$DS_SERVE" != "off" ]; then
-  note "DS_SERVE=$DS_SERVE ignored: ds-serve is not ported to the OpenCode v2 server yet; using a private --standalone server"
+  ATTACH="$("$SELF_DIR/ds-serve" start 2>/dev/null || true)"
+  if [ -z "$ATTACH" ]; then
+    note "shared backend unavailable, falling back to a private --standalone server"
+  elif [ -z "${OPENCODE_SERVER_PASSWORD:-}" ]; then
+    read -r OC_SERVER_PASSWORD < "$DS_STATE_DIR/serve.password" 2>/dev/null \
+      || { note "no serve.password in $DS_STATE_DIR; falling back to a private --standalone server"; ATTACH=""; }
+  fi
 fi
 
 # ---- serving-model autodetect --------------------------------------------------
@@ -728,9 +734,9 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
   ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}.stderr"
 
   # Never pass an empty --model: an OMO-configured call lets the preset choose.
-  # No --server means a private --standalone server: v2's default is a shared
-  # background service, which is not the one-shot process DS_SERVE=off promises
-  # and has been seen unable to reach the GX10 box (EHOSTUNREACH).
+  # No --server means a private --standalone server: v2's default is the
+  # managed background service, whose reach to the GX10 box depends on where
+  # it was last started (it has failed with EHOSTUNREACH).
   ARGS=(run --agent "$AGENT" --format json)
   [ -n "$MODEL" ]   && ARGS+=(--model "$(oc_model_ref "$MODEL" "$VARIANT")")
   if [ -n "$ATTACH" ]; then ARGS+=(--server "$ATTACH"); else ARGS+=(--standalone); fi
@@ -794,9 +800,12 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
     RECOVERY_ERR="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.stderr"
     RECOVERY_STOP="$DS_STATE_DIR/runs/${STAMP}-${ROLE}-recovery.progress.stop"
     RECOVERY_PROMPT="Your previous read-only ${CONTRACT_ROLE} run ended before emitting the required final report. Do not use tools or perform more searches. Using only the work already completed in this session, emit the required ${CONTRACT_ROLE} report now in the exact required format. If evidence is incomplete, say so explicitly in the required gap section. Do not claim verification without evidence."
-    RECOVERY_ARGS=(run --agent "$AGENT" --format json)
+    # Always --standalone, even with a shared backend: the tools-off override
+    # below travels in this process's environment, and a running server never
+    # sees it. The session itself lives in OpenCode's database, which the
+    # private server shares.
+    RECOVERY_ARGS=(run --agent "$AGENT" --format json --standalone)
     [ -n "$MODEL" ] && RECOVERY_ARGS+=(--model "$(oc_model_ref "$MODEL" "$VARIANT")")
-    if [ -n "$ATTACH" ]; then RECOVERY_ARGS+=(--server "$ATTACH"); else RECOVERY_ARGS+=(--standalone); fi
     # Keep the explicit session id while marking this as a continuation. The
     # former selects the exact timed-out session; the latter prevents OpenCode
     # from treating recovery as a fresh run when the watchdog interrupted it.
@@ -814,7 +823,7 @@ for MODEL in "${MODEL_CHAIN[@]}"; do
     DS_PROGRESS_PID=""
     ds_start_progress_monitor "$RECOVERY_RAW" "$RECOVERY_STOP" "$PROGRESS_INTERVAL_EFFECTIVE"
     RECOVERY_RC=0
-    ds_run_with_watchdog "$DS_RECOVERY_IDLE_TIMEOUT" "$DS_RECOVERY_MAX_RUNTIME" "$RECOVERY_RAW" "$RECOVERY_ERR" \
+    OC_SERVER_PASSWORD="" ds_run_with_watchdog "$DS_RECOVERY_IDLE_TIMEOUT" "$DS_RECOVERY_MAX_RUNTIME" "$RECOVERY_RAW" "$RECOVERY_ERR" \
       oc_in_dir "$DIR" env OPENCODE_CONFIG_CONTENT="$RECOVERY_CONFIG_CONTENT" \
       opencode "${RECOVERY_ARGS[@]}" "$RECOVERY_PROMPT" || RECOVERY_RC=$?
     ds_stop_progress_monitor "$RECOVERY_STOP"
@@ -889,8 +898,10 @@ FINAL_RESULT="$(printf '%s' "$FINAL_RESULT" | jq \
   --argjson attempt_count "$ATTEMPT_INDEX" \
   --argjson chain_length "$CHAIN_LEN" \
   --argjson fallback_used "$FALLBACK_USED" \
-  --arg chain_stop_reason "$CHAIN_STOP_REASON" '
+  --arg chain_stop_reason "$CHAIN_STOP_REASON" \
+  --arg backend "${ATTACH:-standalone}" '
   . + {
+    backend: $backend,
     wrapper_exit: $wrapper_exit,
     recovered: ($recovery_succeeded == 1),
     recovery_attempted: ($recovery_attempted == 1),

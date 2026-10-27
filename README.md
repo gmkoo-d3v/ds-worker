@@ -11,7 +11,8 @@ running on OpenCode headless.
         └────────────┬─────────────┘
                      │ ds-worker (Bash)
         ┌────────────▼─────────────┐
-        │ opencode run --standalone│  OpenCode v2, private server per call
+        │ opencode run --standalone│  OpenCode v2: private server per call
+        │   (or --server: ds-serve)│  DS_SERVE=auto, password-protected
         │ (+ OmO Slim, optional)  │
         └────────────┬────────────┘
                      │ --agent [--model]
@@ -64,7 +65,7 @@ files inlined. It needs only `curl` and `jq`, so it keeps working when the
 OpenCode CLI changes; the model has no tools, so hand it everything it needs.
 
 ```bash
-ds-serve start|status|stop    # resident backend — not yet ported to the OpenCode v2 server
+ds-serve start|status|stop    # resident v2 backend; password in ~/.local/state/ds-worker/serve.password (0600)
 ```
 
 ```bash
@@ -105,7 +106,7 @@ and ignored, and nothing in it is executed.
 | `DS_RECOVERY_IDLE_TIMEOUT` / `DS_RECOVERY_MAX_RUNTIME` | `60` / `180` seconds |
 | `DS_OPENCODE_HOST` / `DS_OPENCODE_PORT` | `127.0.0.1` / `4096` (scans upward if busy) |
 | `DS_PORT_SCAN` | `20` (ports tried from `DS_OPENCODE_PORT`) |
-| `DS_SERVE` | `off` (`auto` is ignored with a notice until `ds-serve` supports OpenCode v2) |
+| `DS_SERVE` | `off` (`auto` runs through the `ds-serve` backend; about 1.7 s less per call, recovery stays `--standalone`) |
 | `DS_AUTO` | `1` (passes `--auto`) |
 | `DS_STATE_DIR` | `~/.local/state/ds-worker` |
 

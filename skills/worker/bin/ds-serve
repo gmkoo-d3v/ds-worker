@@ -5,6 +5,11 @@
 #
 # `start` prints the backend URL on stdout; everything else goes to stderr.
 #
+# OpenCode v2 servers require a password. ds-serve keeps one in
+# $DS_STATE_DIR/serve.password (mode 0600, generated on first start) unless
+# OPENCODE_SERVER_PASSWORD is set, and ds-worker hands it to each run as
+# OPENCODE_PASSWORD. It never goes on a command line: argv is visible in ps.
+#
 # IMPORTANT: a responding port is NOT proof the backend is ours. OpenCode TUI
 # sessions run their own HTTP server (default port 4096, then 4097, ...), and
 # attaching `opencode run` to one of those fails with "Session not found" — and
@@ -71,6 +76,7 @@ DS_PORT_SCAN="${DS_PORT_SCAN:-20}"             # ports to try from DS_OPENCODE_P
 DS_STATE_DIR="${DS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ds-worker}"
 
 STATE="$DS_STATE_DIR/serve.state"              # "<pid> <url> <agent-fingerprint>"
+PASSWORD_FILE="$DS_STATE_DIR/serve.password"   # ds-worker reads the same path
 LOG_FILE="$DS_STATE_DIR/serve.log"
 AGENT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
 LOCK_DIR="$DS_STATE_DIR/serve.lock"
@@ -122,8 +128,35 @@ agent_fingerprint() {
 # Anything accepting TCP on this port? (bash builtin, no lsof permissions needed)
 port_busy() { (exec 3<>"/dev/tcp/$DS_OPENCODE_HOST/$1") 2>/dev/null && exec 3>&- && return 0; return 1; }
 
-# An OpenCode server answers GET /config with JSON.
-responds() { curl -sf -m 3 -o /dev/null -H 'accept: application/json' "$1/config" 2>/dev/null; }
+serve_password() {
+  if [ -n "${OPENCODE_SERVER_PASSWORD:-}" ]; then
+    printf '%s' "$OPENCODE_SERVER_PASSWORD"
+    return 0
+  fi
+  [ -s "$PASSWORD_FILE" ] || return 1
+  local pw; read -r pw < "$PASSWORD_FILE"
+  printf '%s' "$pw"
+}
+
+ensure_password() {   # called under the serve lock
+  serve_password >/dev/null && return 0
+  ( umask 077
+    head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$PASSWORD_FILE.tmp"
+    printf '\n' >> "$PASSWORD_FILE.tmp"
+    mv "$PASSWORD_FILE.tmp" "$PASSWORD_FILE" )
+}
+
+# On v2 every path outside /api serves the web UI with 200, so only an
+# authenticated GET /api/info proves an OpenCode API is up — and its pid field
+# proves it is the process we started. The credential goes to curl on stdin.
+responds() {   # $1 = url, $2 = pid the server must report
+  local pw body
+  pw="$(serve_password)" || return 1
+  pw="${pw//\\/\\\\}"; pw="${pw//\"/\\\"}"
+  body="$(printf 'user = "opencode:%s"\n' "$pw" \
+    | curl -sf -m 3 -K - -H 'accept: application/json' "$1/api/info" 2>/dev/null)" || return 1
+  [ "$(jq -r '.pid // empty' <<<"$body" 2>/dev/null)" = "$2" ]
+}
 
 read_state() {
   [ -f "$STATE" ] || return 1
@@ -137,7 +170,7 @@ read_state() {
 is_ours() {
   read_state || return 1
   kill -0 "$SPID" 2>/dev/null || return 1
-  responds "$SURL" || return 1
+  responds "$SURL" "$SPID" || return 1
   [ "$SFP" = "$(agent_fingerprint)" ] || return 1
   return 0
 }
@@ -164,6 +197,7 @@ cmd_start() {
   fi
   rm -f "$STATE"
   command -v opencode >/dev/null || die "opencode not found on PATH"
+  command -v jq >/dev/null || die "jq not found on PATH"
 
   if [ "$DS_OPENCODE_HOST" != "127.0.0.1" ] && [ "$DS_OPENCODE_HOST" != "localhost" ] \
      && [ -z "${OPENCODE_SERVER_PASSWORD:-}" ]; then
@@ -174,7 +208,9 @@ cmd_start() {
     || die "no free port in ${DS_OPENCODE_PORT}..$((DS_OPENCODE_PORT + DS_PORT_SCAN)) (set DS_OPENCODE_PORT)"
   local url="http://${DS_OPENCODE_HOST}:${port}"
 
-  nohup opencode serve --hostname "$DS_OPENCODE_HOST" --port "$port" >>"$LOG_FILE" 2>&1 &
+  ensure_password
+  OPENCODE_SERVER_PASSWORD="$(serve_password)" \
+    nohup opencode serve --hostname "$DS_OPENCODE_HOST" --port "$port" >>"$LOG_FILE" 2>&1 &
   local pid=$!
   printf '%s %s %s\n' "$pid" "$url" "$(agent_fingerprint)" > "$STATE"
 
@@ -183,7 +219,7 @@ cmd_start() {
     if ! kill -0 "$pid" 2>/dev/null; then
       rm -f "$STATE"; die "server exited during startup; see $LOG_FILE"
     fi
-    if responds "$url"; then
+    if responds "$url" "$pid"; then
       printf 'ds-serve: up at %s (pid %s)\n' "$url" "$pid" >&2
       printf '%s\n' "$url"
       release_lock

@@ -51,9 +51,12 @@ esac
 EOF
 chmod +x "$FAKE_BIN/rm"
 
+# v2 probe: an authenticated /api/info naming the pid ds-serve recorded.
 cat > "$FAKE_BIN/curl" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+cat >/dev/null
+read -r pid _ <"$DS_STATE_DIR/serve.state" 2>/dev/null || exit 7
+printf '{"pid":%s}\n' "$pid"
 EOF
 chmod +x "$FAKE_BIN/curl"
 

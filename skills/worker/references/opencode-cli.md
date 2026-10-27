@@ -35,7 +35,7 @@ Actual flags, from `opencode run --help` (v2.1.4):
 |---|---|---|
 | `opencode agent list` | prints help, **exits 0** — a grep on it finds nothing | `oc_agent_list` reads `opencode debug agents` (JSON array of `name`, `mode`, `hidden`, `permissions`) and prints `name (mode)` rows |
 | `run --dir <path>` | unknown flag, prints help | the child is started inside `--dir` (`oc_in_dir`); v2 uses the process cwd |
-| `run --attach <url>` | `--server <url>` | `ds-serve` is not ported yet, so every run is `--standalone` |
+| `run --attach <url>` | `--server <url>` | `--server` to the `ds-serve` backend with `DS_SERVE=auto`, else `--standalone` |
 | `run --variant <name>` | `--model provider/model#variant` | `oc_model_ref` appends `#variant` |
 
 Measured v2 behavior the wrapper relies on:
@@ -55,11 +55,20 @@ Measured v2 behavior the wrapper relies on:
 - Errors arrive as a `{"type":"error","error":{"type":...,"message":...}}` event
   with exit 1; ds-worker copies the messages into the result's `errors` array.
 
-## Long-lived backend (v2 measured; `ds-serve` not ported yet)
+## Long-lived backend (v2)
 
-Until `ds-serve` is ported, `ds-worker` ignores `DS_SERVE` with a notice. What a
-v2 `opencode serve` does, measured on 2026-10-27 against a server started from
-a normal shell on a spare port:
+`ds-serve` starts its own `opencode serve` and gives it a password through
+`OPENCODE_SERVER_PASSWORD`: the caller's, or one generated into
+`$DS_STATE_DIR/serve.password` (0600). It counts the backend as ours only when
+an authenticated `GET /api/info` reports the pid it recorded. The credential
+goes to curl on stdin (`-K -`). With `DS_SERVE=auto`, `ds-worker` runs
+`--server <url>` and passes the password as `OPENCODE_PASSWORD`. Read-only
+recovery always runs `--standalone`; a standalone run continues a session the
+backend created, since both use OpenCode's database. The live part of
+`tests/test_opencode_v2_contract.sh` covers all three.
+
+What a v2 `opencode serve` does, measured on 2026-10-27 against a server
+started from a normal shell on a spare port:
 
 - **Password.** Without `OPENCODE_SERVER_PASSWORD` the server generates one and
   prints it on startup. With it set, that value is used and nothing is printed.
@@ -97,6 +106,9 @@ a normal shell on a spare port:
   definition right after the edit and with the new one 5 s later. No restart
   is needed, but there is a stale window of a few seconds (measured with a
   project-local `.opencode/agent/`).
+- **stdin.** `run` reads a non-terminal stdin to EOF before it starts: with an
+  open pipe on stdin it waited 21 s, exactly as long as the pipe stayed open.
+  `oc_in_dir` runs the child with `</dev/null`.
 - **Cost of `--standalone`.** "Reply with exactly: pong" took 3.2–3.7 s with
   `--standalone` vs 1.5–1.9 s through a running server (5 runs each). The same
   request by plain `curl` to GX10 took 0.6 s.

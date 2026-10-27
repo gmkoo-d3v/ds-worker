@@ -116,11 +116,19 @@ model is actually loaded and uses that — load Qwen instead of DeepSeek on
 present in the provider's catalog in `opencode.jsonc`; otherwise it keeps the
 configured pin and says why. Set `DS_MODEL_AUTODETECT=0` to disable.
 
-Every OpenCode role runs `opencode run --standalone` — a private server per
-call, started inside `--dir` (OpenCode v2 has no `run --dir`). v2's default
-shared background service could not reach the GX10 box when measured.
-`DS_SERVE=auto` is ignored with a notice until `ds-serve` is ported to the v2
-server; see [references/opencode-cli.md](references/opencode-cli.md).
+Every OpenCode role is started inside `--dir` (OpenCode v2 has no `run --dir`;
+a v2 server uses the client's cwd). By default each call runs
+`opencode run --standalone`, a private server per call. With `DS_SERVE=auto`
+it runs `--server` against the backend `ds-serve` owns. That saves about 1.7 s
+of startup per call (3.4 s vs 1.7 s for a minimal call), which matters only for
+many short calls. The backend is password-protected: `ds-serve` keeps the
+password in `$DS_STATE_DIR/serve.password` (0600) unless
+`OPENCODE_SERVER_PASSWORD` is set, and ds-worker passes it as
+`OPENCODE_PASSWORD`, never on argv. Read-only recovery always runs
+`--standalone`, because its tools-off override cannot reach a running server.
+v2's own managed `opencode service` is not used. Whether it can reach the GX10
+box depends on where it was last started. See
+[references/opencode-cli.md](references/opencode-cli.md).
 
 Each role tries its resolved model up to `DS_MODEL_RETRIES` times (default 2),
 then its fallback model up to `DS_MODEL_RETRIES` more times if one is set —

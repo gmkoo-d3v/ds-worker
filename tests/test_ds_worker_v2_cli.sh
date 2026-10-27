@@ -3,7 +3,10 @@
 # the removed v1 flags (run --dir/--attach/--variant, `agent list`) records the
 # argv and cwd of each run, so these cases pin:
 #   - the run is started inside --dir, never with --dir
-#   - a private --standalone server, never --attach (DS_SERVE is only a notice)
+#   - a private --standalone server, never --attach
+#   - DS_SERVE=auto: --server to the ds-serve backend, its password in the
+#     child's OPENCODE_PASSWORD (never argv); read-only recovery stays
+#     --standalone without it
 #   - --variant travels as --model provider/model#variant
 #   - a relative --file is resolved against the caller's cwd
 #   - the agent list comes from `debug agents`, retried past a cold-start `[]`
@@ -18,7 +21,10 @@ FAKE_BIN="$TEST_ROOT/bin"
 WORK_DIR="$TEST_ROOT/work"
 CALLER_DIR="$TEST_ROOT/caller"
 
-cleanup() { rm -rf "$TEST_ROOT"; }
+cleanup() {
+  DS_STATE_DIR="$TEST_ROOT/state" DS_CONFIG=/dev/null "$ROOT/skills/worker/bin/ds-serve" stop >/dev/null 2>&1 || true
+  rm -rf "$TEST_ROOT"
+}
 trap cleanup EXIT
 mkdir -p "$FAKE_BIN" "$WORK_DIR" "$CALLER_DIR" "$TEST_ROOT/state" "$TEST_ROOT/xdg/opencode"
 
@@ -37,6 +43,7 @@ case "${1:-} ${2:-}" in
     exit 0 ;;
   "agent list") printf 'DESCRIPTION\n  OpenCode command line interface\n'; exit 0 ;;
 esac
+[ "${1:-}" = serve ] && exec sleep 60
 [ "${1:-}" = run ] || exit 0
 for arg in "$@"; do
   case "$arg" in
@@ -46,9 +53,22 @@ done
 n="$(find "$DS_TEST_ARGV_DIR" -name '*.argv' | wc -l | tr -d ' ')"
 printf '%s\n' "$@" >"$DS_TEST_ARGV_DIR/$n.argv"
 printf '%s\n' "$PWD" >"$DS_TEST_ARGV_DIR/$n.cwd"
+printf '%s\n' "${OPENCODE_PASSWORD:-}" >"$DS_TEST_ARGV_DIR/$n.pw"
+# DS_TEST_MISSING: the first run ends without the report, so recovery runs.
+if [ -n "${DS_TEST_MISSING:-}" ] && ! printf '%s\n' "$@" | grep -qx -- --session; then
+  printf '%s\n' '{"type":"text","sessionID":"ses-v2","part":{"text":"partial"}}'
+  exit 0
+fi
 printf '%s\n' '{"type":"text","sessionID":"ses-v2","part":{"text":"### SUMMARY\nok\n\n### FINDINGS\nnone\n\n### SEARCH COVERAGE\nnone\n\n### GAPS\nnone"}}'
 EOF
-chmod +x "$FAKE_BIN/opencode"
+# ds-serve's v2 probe: an authenticated /api/info naming the recorded pid.
+cat > "$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+read -r pid _ <"$DS_STATE_DIR/serve.state" 2>/dev/null || exit 7
+printf '{"pid":%s}\n' "$pid"
+EOF
+chmod +x "$FAKE_BIN/opencode" "$FAKE_BIN/curl"
 
 export PATH="$FAKE_BIN:$PATH"
 export DS_CONFIG=/dev/null DS_STATE_DIR="$TEST_ROOT/state" DS_MODEL_AUTODETECT=0
@@ -81,13 +101,25 @@ jq -e '.outcome == "CLEAN_RESULT" and .errors == []' "$TEST_ROOT/basic.out" >/de
   || fail "result" "$(cat "$TEST_ROOT/basic.out")"
 printf 'ds-worker runs inside --dir with --standalone, model#variant, absolute --file: PASS\n'
 
-# ---- DS_SERVE is a notice, not --attach/--server ------------------------------------
-DS_SERVE=auto run_case serve explorer --dir "$WORK_DIR" --json --quiet "map"
-printf '%s\n' "$(cat "$TEST_ROOT/serve/0.argv")" | grep -qx -- '--standalone' \
-  || fail "serve" "DS_SERVE=auto must still run --standalone"
-grep -q 'not ported to the OpenCode v2 server' "$TEST_ROOT/serve.err" \
-  || fail "serve" "expected a notice that DS_SERVE is ignored; stderr: $(cat "$TEST_ROOT/serve.err")"
-printf 'DS_SERVE=auto falls back to --standalone with a notice: PASS\n'
+# ---- DS_SERVE=auto: --server plus OPENCODE_PASSWORD, recovery standalone -------------
+DS_TEST_MISSING=1 DS_SERVE=auto run_case serve explorer --dir "$WORK_DIR" --json --quiet "map"
+PW="$(cat "$TEST_ROOT/state/serve.password")"
+URL="$(read -r _ u _ <"$TEST_ROOT/state/serve.state"; printf '%s' "$u")"
+FIRST="$(cat "$TEST_ROOT/serve/0.argv")"; SECOND="$(cat "$TEST_ROOT/serve/1.argv")"
+printf '%s\n' "$FIRST" | grep -qx -- "$URL" && printf '%s\n' "$FIRST" | grep -qx -- --server \
+  || fail "serve" "first run must use --server $URL; argv:
+$FIRST"
+printf '%s\n' "$FIRST" | grep -qx -- --standalone && fail "serve" "first run must not be --standalone"
+[ "$(cat "$TEST_ROOT/serve/0.pw")" = "$PW" ] || fail "serve" "first run did not get OPENCODE_PASSWORD"
+grep -qF "$PW" "$TEST_ROOT/serve/0.argv" && fail "serve" "password appeared in the run argv"
+printf '%s\n' "$SECOND" | grep -qx -- --standalone && ! printf '%s\n' "$SECOND" | grep -qx -- --server \
+  || fail "recovery" "recovery must be --standalone; argv:
+$SECOND"
+[ -z "$(cat "$TEST_ROOT/serve/1.pw")" ] || fail "recovery" "recovery must not carry OPENCODE_PASSWORD"
+jq -e --arg url "$URL" '.backend == $url and .recovered' "$TEST_ROOT/serve.out" >/dev/null \
+  || fail "serve" "result: $(jq -c '{backend, recovered, outcome}' "$TEST_ROOT/serve.out")"
+jq -e '.backend == "standalone"' "$TEST_ROOT/basic.out" >/dev/null || fail "backend" "basic run must report backend=standalone"
+printf 'DS_SERVE=auto runs --server with OPENCODE_PASSWORD; recovery stays --standalone: PASS\n'
 
 # ---- agent list: cold-start [] is retried -------------------------------------------
 DS_TEST_COLD="$TEST_ROOT/cold.flag" run_case cold explorer --dir "$WORK_DIR" --json --quiet "map"

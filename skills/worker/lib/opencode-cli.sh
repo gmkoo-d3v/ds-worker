@@ -36,11 +36,19 @@ oc_model_ref() {
   fi
 }
 
-# v2 `run` has no --dir: the agent works in the process's cwd. Meant to be the
-# command handed to ds_run_with_watchdog, which runs it in a background
-# subshell, so the cd and exec never touch the caller.
+# v2 `run` has no --dir: the agent works in the process's cwd (also through
+# --server: the server uses the client's cwd). Meant to be the command handed
+# to ds_run_with_watchdog, which runs it in a background subshell, so the cd,
+# the export and the exec never touch the caller. A non-empty
+# OC_SERVER_PASSWORD (a plain shell variable) reaches the child only, as the
+# OPENCODE_PASSWORD the v2 client reads for --server. stdin is /dev/null: v2
+# `run` reads a non-terminal stdin to EOF before it starts (measured: an open
+# pipe held it for as long as the pipe stayed open).
 oc_in_dir() {
   cd "$1" || exit 1
   shift
-  exec "$@"
+  if [ -n "${OC_SERVER_PASSWORD:-}" ]; then
+    export OPENCODE_PASSWORD="$OC_SERVER_PASSWORD"
+  fi
+  exec "$@" </dev/null
 }

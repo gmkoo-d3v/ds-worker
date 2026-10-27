@@ -206,7 +206,7 @@ SERVE="$(dirname "$(command -v ds-serve || echo "$(dirname "$0")/ds-serve")")/ds
 if url="$("$SERVE" url 2>/dev/null)"; then
   pass "backend up at $url (ours)"
 else
-  info "no backend of ours running (ds-worker runs --standalone; ds-serve is not ported to OpenCode v2)"
+  info "no backend of ours running (DS_SERVE=auto starts one; otherwise each call runs --standalone)"
 fi
 
 [ "$FAIL" -eq 0 ] && echo "all checks passed" || echo "some checks failed" >&2
